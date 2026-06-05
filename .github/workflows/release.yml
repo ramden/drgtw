@@ -17,6 +17,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # QEMU provides the emulation needed to build the linux/arm64 image on
+      # the amd64 GitHub runner. Must run before buildx.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -36,11 +41,16 @@ jobs:
             # only stable releases (no -alpha/-rc suffix) move `latest`
             type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
 
-      - name: Build and push image (amd64)
+      # Multi-arch build. The arm64 image is built under QEMU emulation on the
+      # amd64 runner; a release build (rustc + ort's ONNX Runtime download) is
+      # CPU-bound, so the arm64 leg can take significantly longer than amd64.
+      # A single build-push-action invocation produces a multi-platform
+      # manifest; shared GHA cache (mode=max) is keyed per-platform internally.
+      - name: Build and push image (amd64 + arm64)
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

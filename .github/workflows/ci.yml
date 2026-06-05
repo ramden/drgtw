@@ -52,10 +52,15 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build image (no push)
+      # PR/CI builds are amd64-only on purpose: this only validates that the
+      # Dockerfile builds. The release workflow builds the full multi-arch
+      # manifest (linux/amd64 + linux/arm64); adding arm64 here would force a
+      # slow QEMU-emulated build on every PR for no extra signal.
+      - name: Build image (no push, amd64)
         uses: docker/build-push-action@v6
         with:
           context: .
+          platforms: linux/amd64
           push: false
           tags: drgtw:ci
           cache-from: type=gha
