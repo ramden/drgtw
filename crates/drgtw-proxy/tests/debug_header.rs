@@ -56,6 +56,10 @@ fn openai_pii_config(mock_base_url: &str, pii_enabled: bool) -> Arc<Config> {
             format: ApiFormat::OpenAi,
             models: vec!["gpt-4o".into()],
             model_costs: Default::default(),
+            region: None,
+            aws_access_key_id: None,
+            aws_secret_access_key: None,
+            aws_session_token: None,
         }],
         virtual_keys: vec![VirtualKey {
             key: "sk-drgtw-dbgtest001".into(),

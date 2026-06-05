@@ -51,6 +51,10 @@ fn openai_conn(name: &str, base: &str, costs: Vec<(&str, f64, f64)>) -> Connecti
         format: ApiFormat::OpenAi,
         models: vec!["gpt-4o".into()],
         model_costs,
+        region: None,
+        aws_access_key_id: None,
+        aws_secret_access_key: None,
+        aws_session_token: None,
     }
 }
 
@@ -676,6 +680,10 @@ async fn test_event_stream_anthropic_usage() {
             )]
             .into_iter()
             .collect(),
+            region: None,
+            aws_access_key_id: None,
+            aws_secret_access_key: None,
+            aws_session_token: None,
         }],
         virtual_keys: vec![VirtualKey {
             key: "sk-drgtw-ev03".into(),

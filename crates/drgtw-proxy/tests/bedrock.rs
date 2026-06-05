@@ -223,6 +223,10 @@ async fn bedrock_openai_compat_routes_and_bills() {
             format: ApiFormat::OpenAi,
             models: vec!["us.anthropic.claude-sonnet-4-6".into()],
             model_costs: model_costs(vec![("us.anthropic.claude-sonnet-4-6", 3.0, 15.0)]),
+            region: None,
+            aws_access_key_id: None,
+            aws_secret_access_key: None,
+            aws_session_token: None,
         }],
         virtual_keys: vec![VirtualKey {
             key: "sk-drgtw-bedrockoai01".into(),
@@ -303,6 +307,10 @@ async fn bedrock_openai_compat_streams_sse() {
             format: ApiFormat::OpenAi,
             models: vec!["openai.gpt-oss-120b".into()],
             model_costs: model_costs(vec![("openai.gpt-oss-120b", 0.15, 0.60)]),
+            region: None,
+            aws_access_key_id: None,
+            aws_secret_access_key: None,
+            aws_session_token: None,
         }],
         virtual_keys: vec![VirtualKey {
             key: "sk-drgtw-bedrockoai02".into(),
@@ -364,6 +372,10 @@ async fn bedrock_cost_wildcard_key_matches() {
             models: vec!["us.anthropic.claude-*".into()],
             // Cost keyed by wildcard — must match the concrete id below.
             model_costs: model_costs(vec![("us.anthropic.claude-*", 3.0, 15.0)]),
+            region: None,
+            aws_access_key_id: None,
+            aws_secret_access_key: None,
+            aws_session_token: None,
         }],
         virtual_keys: vec![VirtualKey {
             key: "sk-drgtw-bedrockoai03".into(),
@@ -433,6 +445,10 @@ async fn bedrock_invoke_non_streaming_routes_and_bills() {
                 3.0,
                 15.0,
             )]),
+            region: None,
+            aws_access_key_id: None,
+            aws_secret_access_key: None,
+            aws_session_token: None,
         }],
         virtual_keys: vec![VirtualKey {
             key: "sk-drgtw-bedrocknat01".into(),
@@ -501,6 +517,10 @@ async fn bedrock_invoke_preserves_client_anthropic_version() {
             format: ApiFormat::Bedrock,
             models: vec!["eu.anthropic.claude-sonnet-4-6".into()],
             model_costs: Default::default(),
+            region: None,
+            aws_access_key_id: None,
+            aws_secret_access_key: None,
+            aws_session_token: None,
         }],
         virtual_keys: vec![VirtualKey {
             key: "sk-drgtw-bedrocknat02".into(),
@@ -560,6 +580,10 @@ async fn bedrock_invoke_strips_model_into_path() {
             format: ApiFormat::Bedrock,
             models: vec!["eu.anthropic.claude-sonnet-4-6".into()],
             model_costs: Default::default(),
+            region: None,
+            aws_access_key_id: None,
+            aws_secret_access_key: None,
+            aws_session_token: None,
         }],
         virtual_keys: vec![VirtualKey {
             key: "sk-drgtw-bedrocknat03".into(),
@@ -614,6 +638,10 @@ async fn bedrock_streaming_request_rejected_no_upstream_call() {
             format: ApiFormat::Bedrock,
             models: vec!["eu.anthropic.claude-sonnet-4-6".into()],
             model_costs: Default::default(),
+            region: None,
+            aws_access_key_id: None,
+            aws_secret_access_key: None,
+            aws_session_token: None,
         }],
         virtual_keys: vec![VirtualKey {
             key: "sk-drgtw-bedrocknat04".into(),

@@ -50,6 +50,10 @@ fn chat_config(mock_base_url: &str) -> Arc<Config> {
                 "gpt-4o".to_string(),
                 ModelCost { input_per_1m: 5.0, output_per_1m: 15.0 },
             )]),
+            region: None,
+            aws_access_key_id: None,
+            aws_secret_access_key: None,
+            aws_session_token: None,
         }],
         virtual_keys: vec![VirtualKey {
             key: VKEY.into(),

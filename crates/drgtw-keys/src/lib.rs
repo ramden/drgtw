@@ -713,6 +713,10 @@ mod tests {
             format: ApiFormat::OpenAi,
             models: models.iter().map(|s| s.to_string()).collect(),
             model_costs: HashMap::new(),
+            region: None,
+            aws_access_key_id: None,
+            aws_secret_access_key: None,
+            aws_session_token: None,
         }
     }
 

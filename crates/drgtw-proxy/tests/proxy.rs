@@ -46,6 +46,10 @@ fn tiny_max_body_config(mock_base_url: &str) -> Arc<Config> {
             format: ApiFormat::OpenAi,
             models: vec!["gpt-4o".into()],
             model_costs: Default::default(),
+            region: None,
+            aws_access_key_id: None,
+            aws_secret_access_key: None,
+            aws_session_token: None,
         }],
         virtual_keys: vec![VirtualKey {
             key: "sk-drgtw-bodylimit".into(),
@@ -77,6 +81,10 @@ fn test_config(mock_base_url: &str) -> Arc<Config> {
             format: ApiFormat::OpenAi,
             models: vec!["gpt-4o".into(), "gpt-4o-mini".into()],
             model_costs: Default::default(),
+            region: None,
+            aws_access_key_id: None,
+            aws_secret_access_key: None,
+            aws_session_token: None,
         }],
         virtual_keys: vec![
             VirtualKey {
@@ -269,6 +277,10 @@ async fn test_unknown_model_returns_404() {
             format: ApiFormat::OpenAi,
             models: vec!["gpt-4o".into()],
             model_costs: Default::default(),
+            region: None,
+            aws_access_key_id: None,
+            aws_secret_access_key: None,
+            aws_session_token: None,
         }],
         virtual_keys: vec![VirtualKey {
             key: "sk-drgtw-noallowlist404".into(),
@@ -490,6 +502,10 @@ async fn test_upstream_connect_error_returns_502() {
             format: ApiFormat::OpenAi,
             models: vec!["gpt-4o".into()],
             model_costs: Default::default(),
+            region: None,
+            aws_access_key_id: None,
+            aws_secret_access_key: None,
+            aws_session_token: None,
         }],
         virtual_keys: vec![VirtualKey {
             key: "sk-drgtw-connecterr".into(),
@@ -612,6 +628,10 @@ async fn test_body_within_limit_openai_proceeds() {
             format: ApiFormat::OpenAi,
             models: vec!["gpt-4o".into()],
             model_costs: Default::default(),
+            region: None,
+            aws_access_key_id: None,
+            aws_secret_access_key: None,
+            aws_session_token: None,
         }],
         virtual_keys: vec![VirtualKey {
             key: "sk-drgtw-biglimit".into(),

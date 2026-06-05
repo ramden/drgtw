@@ -26,7 +26,7 @@ pub fn provider_name(format: ApiFormat) -> &'static str {
     match format {
         ApiFormat::OpenAi => "openai",
         ApiFormat::Anthropic => "anthropic",
-        ApiFormat::Bedrock => "aws.bedrock",
+        ApiFormat::Bedrock | ApiFormat::BedrockConverse => "aws.bedrock",
     }
 }
 

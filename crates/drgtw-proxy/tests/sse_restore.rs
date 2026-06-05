@@ -39,6 +39,10 @@ fn openai_pii_config(mock_base_url: &str) -> Arc<Config> {
             format: ApiFormat::OpenAi,
             models: vec!["gpt-4o".into()],
             model_costs: Default::default(),
+            region: None,
+            aws_access_key_id: None,
+            aws_secret_access_key: None,
+            aws_session_token: None,
         }],
         virtual_keys: vec![VirtualKey {
             key: "sk-drgtw-ssetest001".into(),
@@ -73,6 +77,10 @@ fn anthropic_pii_config(mock_base_url: &str) -> Arc<Config> {
             format: ApiFormat::Anthropic,
             models: vec!["claude-3-5-sonnet".into()],
             model_costs: Default::default(),
+            region: None,
+            aws_access_key_id: None,
+            aws_secret_access_key: None,
+            aws_session_token: None,
         }],
         virtual_keys: vec![VirtualKey {
             key: "sk-drgtw-ssetest001".into(),

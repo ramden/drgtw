@@ -23,9 +23,11 @@ Array of upstream provider connections. Each entry is a TOML array-of-tables blo
 |-------|------|----------|---------|-------------|
 | `name` | string | yes | — | Unique identifier. Referenced by `[[virtual_keys]].connections`. |
 | `base_url` | string (URL) | yes | — | Absolute `http://` or `https://` base URL. No query string or fragment allowed. Supports `${ENV_VAR}` references. |
-| `api_key` | string | yes | — | Upstream API key. Supports `${ENV_VAR}` references (see [Env-var resolution](#env-var-resolution)). |
-| `format` | enum string | yes | — | Wire protocol. One of `"open_ai"`, `"anthropic"`, or `"bedrock"`. |
+| `api_key` | string | yes¹ | — | Upstream API key. Supports `${ENV_VAR}` references (see [Env-var resolution](#env-var-resolution)). |
+| `format` | enum string | yes | — | Wire protocol. One of `"open_ai"`, `"anthropic"`, `"bedrock"`, or `"bedrock_converse"`. |
 | `models` | array of strings | no | `[]` | Model names served by this connection. Used for routing and allowlist checks. |
+
+¹ Required for every format **except** `"bedrock_converse"`, where an empty `api_key` is allowed if SigV4 credentials are supplied instead (see [SigV4 credential fields](#sigv4-credential-fields-bedrock_converse-only)).
 
 ### `format` values
 
@@ -33,7 +35,21 @@ Array of upstream provider connections. Each entry is a TOML array-of-tables blo
 |------------|-------------------|
 | `"open_ai"` | OpenAI Chat Completions API (`POST {base_url}/chat/completions`) |
 | `"anthropic"` | Anthropic Messages API (`POST {base_url}/v1/messages`) |
-| `"bedrock"` | AWS Bedrock native `InvokeModel` (`POST {base_url}/model/{model}/invoke`), non-streaming, bearer auth, Anthropic-shaped body. See [AWS Bedrock](#aws-bedrock). |
+| `"bedrock"` | AWS Bedrock native `InvokeModel` (`POST {base_url}/model/{model}/invoke`), non-streaming, bearer auth, Anthropic-shaped body. Served on the **`/v1/messages`** endpoint surface. See [AWS Bedrock](#aws-bedrock). |
+| `"bedrock_converse"` | AWS Bedrock **Converse / ConverseStream** (`POST {base_url}/model/{model}/converse[-stream]`). Served on the **`/v1/chat/completions`** endpoint surface (callers use the OpenAI body); **streaming supported**; SigV4 or bearer auth. Covers non-Anthropic models (Nova, Llama, Titan, …) as well as Anthropic. See [AWS Bedrock](#aws-bedrock). |
+
+### SigV4 credential fields (`bedrock_converse` only)
+
+These optional fields are only meaningful when `format = "bedrock_converse"`. All `${ENV_VAR}` references are expanded at startup.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `region` | string | conditional | `null` | AWS region (e.g. `"eu-central-1"`). **Required when SigV4 credentials are present.** |
+| `aws_access_key_id` | string | no | `null` | SigV4 access key id. Supports `${ENV_VAR}`. |
+| `aws_secret_access_key` | string | no | `null` | SigV4 secret access key. Supports `${ENV_VAR}`. Must be set together with `aws_access_key_id`. |
+| `aws_session_token` | string | no | `null` | Optional STS session token. Supports `${ENV_VAR}`. Requires the access-key/secret pair. |
+
+Auth resolution per request: if both `aws_access_key_id` and `aws_secret_access_key` are set, the request is SigV4-signed (adding `Authorization: AWS4-HMAC-SHA256 …`, `x-amz-date`, and — when a session token is present — `x-amz-security-token`); otherwise the non-empty `api_key` is sent as `Authorization: Bearer`.
 
 ---
 
@@ -215,7 +231,8 @@ Rules enforced by `drgtw_config::load()` at startup:
 1. Connection `name` values must be non-empty and unique.
 2. `base_url` must be an absolute `http://` or `https://` URL with no query string or fragment.
 3. All `${VAR}` references in `api_key` and `base_url` must resolve to non-empty environment variables; unresolved references are a hard startup error.
-4. `format` must be exactly `"open_ai"`, `"anthropic"`, or `"bedrock"`.
+4. `format` must be exactly `"open_ai"`, `"anthropic"`, `"bedrock"`, or `"bedrock_converse"`.
+4a. For `format = "bedrock_converse"`: at least one of (a) **both** `aws_access_key_id` and `aws_secret_access_key`, or (b) a non-empty `api_key`, must be set. `aws_access_key_id`/`aws_secret_access_key` must be set **together**. When SigV4 credentials are present, `region` is **required**. `aws_session_token` requires the access-key/secret pair. (The universal "`api_key` non-empty" rule in (3) is relaxed for this format only.)
 5. Virtual key `key` values must start with `sk-drgtw-` and be unique.
 6. Each name in `[[virtual_keys]].connections` must match a defined connection `name`.
 7. `[[virtual_keys]].connections` must be non-empty.
@@ -228,11 +245,18 @@ Rules enforced by `drgtw_config::load()` at startup:
 
 ## AWS Bedrock
 
-DRGTW reaches Amazon Bedrock with a **Bedrock API key** (bearer token) — no AWS
-SigV4 signing. Generate one in the Bedrock console; the conventional environment
-variable is `AWS_BEARER_TOKEN_BEDROCK`. The region is encoded in the hostname.
+DRGTW reaches Amazon Bedrock through one of **three** connection options. Two use
+a **Bedrock API key** (bearer token — generate one in the Bedrock console, the
+conventional env var is `AWS_BEARER_TOKEN_BEDROCK`); the third (Converse) also
+accepts **AWS SigV4** static credentials. The region is encoded in the hostname.
 
-There are two ways to connect, depending on which wire format you want to speak.
+| Option | `format` | Endpoint surface | Wire API | Auth | Streaming |
+|--------|----------|------------------|----------|------|-----------|
+| A — OpenAI-compat | `open_ai` | `/v1/chat/completions` | OpenAI Chat Completions | Bearer | yes (SSE) |
+| B — native InvokeModel | `bedrock` | `/v1/messages` | `InvokeModel` (Anthropic body) | Bearer | **no** |
+| C — Converse | `bedrock_converse` | `/v1/chat/completions` | `Converse` / `ConverseStream` | SigV4 **or** Bearer | **yes** |
+
+Pick by which wire format you want to speak and whether you need SigV4.
 
 ### Option A — OpenAI-compatible endpoint (recommended)
 
@@ -291,8 +315,75 @@ Behaviour:
   (`usage.input_tokens` / `usage.output_tokens`).
 - **Streaming is not supported in this release.** A request with
   `"stream": true` against a `bedrock` connection is rejected with HTTP 400
-  (Anthropic error body) and **no upstream call is made**. Use Option A for
+  (Anthropic error body) and **no upstream call is made**. Use Option A or C for
   streaming.
+
+### Option C — Converse / ConverseStream (`format = "bedrock_converse"`)
+
+A `format = "bedrock_converse"` connection serves the **`/v1/chat/completions`
+endpoint surface** (callers use the stock OpenAI body) and dispatches to
+Bedrock's normalised **Converse** / **ConverseStream** APIs. This covers
+non-Anthropic Bedrock models (Nova, Llama, Titan, …) as well as Anthropic
+through one schema, and — unlike Option B — **supports `stream: true`**. The base
+URL has **no `/v1` suffix**.
+
+SigV4 (static AWS credentials):
+
+```toml
+[[connections]]
+name = "bedrock-converse-sigv4"
+base_url = "https://bedrock-runtime.eu-central-1.amazonaws.com"
+api_key = ""                                    # unused under SigV4
+format = "bedrock_converse"
+region = "eu-central-1"
+aws_access_key_id = "${AWS_ACCESS_KEY_ID}"
+aws_secret_access_key = "${AWS_SECRET_ACCESS_KEY}"
+aws_session_token = "${AWS_SESSION_TOKEN}"      # optional (STS)
+models = ["eu.amazon.nova-pro-v1:0", "eu.meta.llama3-1-70b-instruct-v1:0"]
+
+[connections.model_costs."eu.amazon.nova-pro-v1:0"]
+input_per_1m = 0.8
+output_per_1m = 3.2
+```
+
+Bearer (Bedrock API key) Converse:
+
+```toml
+[[connections]]
+name = "bedrock-converse-bearer"
+base_url = "https://bedrock-runtime.us-east-1.amazonaws.com"
+api_key = "${AWS_BEARER_TOKEN_BEDROCK}"
+format = "bedrock_converse"
+region = "us-east-1"
+models = ["us.amazon.titan-text-premier-v1:0"]
+```
+
+Behaviour:
+
+- The gateway translates the OpenAI request into a Converse body: `system`
+  messages lift to a top-level `system[]` array; `user`/`assistant` messages map
+  to `messages[].content[].text`; `max_tokens`/`max_completion_tokens`,
+  `temperature`, `top_p`, and `stop` map into `inferenceConfig`. The `model` is
+  moved into the URL path (`:` percent-encoded to `%3A`).
+- It issues `POST {base_url}/model/{model}/converse` (or `/converse-stream` when
+  `stream: true`). Auth is SigV4 when AWS credentials are present, else the
+  `api_key` as `Authorization: Bearer` (see
+  [SigV4 credential fields](#sigv4-credential-fields-bedrock_converse-only)).
+- The non-streaming Converse response is translated back into an OpenAI
+  `chat.completion`; `stopReason` maps to `finish_reason`
+  (`end_turn`/`stop_sequence` → `stop`, `max_tokens` → `length`,
+  `tool_use` → `tool_calls`, `content_filtered`/`guardrail_intervened` →
+  `content_filter`). Usage and cost come from `usage.{inputTokens,outputTokens}`.
+- For streaming, the binary `application/vnd.amazon.eventstream` response is
+  re-framed into OpenAI SSE chunks (the client receives `text/event-stream`
+  ending with `data: [DONE]`); usage is captured from the trailing `metadata`
+  event — no `stream_options.include_usage` flag is needed.
+- **Limitations this release (documented):** tool / function calling
+  (`tools`/`tool_choice`) is dropped from the request; non-text content
+  (image/audio/document blocks) is rejected with a 400 `unsupported_content`
+  error before any upstream call; prompt/response cache token fields are not
+  surfaced. PII pseudonymisation/restore runs on the OpenAI shape (before/after
+  translation), so privacy guarantees are unchanged.
 
 ### Model ids and cost keys
 

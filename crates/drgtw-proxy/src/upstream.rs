@@ -44,6 +44,32 @@ pub fn bedrock_invoke_url(base_url: &str, model: &str) -> String {
     )
 }
 
+/// Build the upstream URL for Bedrock `POST /model/{model}/converse`.
+///
+/// `base_url` has NO `/v1` (e.g.
+/// `https://bedrock-runtime.eu-central-1.amazonaws.com`). We trim any trailing
+/// slash and append `/model/{model}/converse`. The model id is percent-encoded
+/// the same way as the native InvokeModel path (only `:` → `%3A`).
+pub fn converse_url(base_url: &str, model: &str) -> String {
+    format!(
+        "{}/model/{}/converse",
+        base_url.trim_end_matches('/'),
+        encode_model_id(model)
+    )
+}
+
+/// Build the upstream URL for Bedrock `POST /model/{model}/converse-stream`.
+///
+/// Identical to [`converse_url`] but appends `/converse-stream`; used when the
+/// client requested `stream: true`.
+pub fn converse_stream_url(base_url: &str, model: &str) -> String {
+    format!(
+        "{}/model/{}/converse-stream",
+        base_url.trim_end_matches('/'),
+        encode_model_id(model)
+    )
+}
+
 /// Percent-encode a Bedrock model id for use as a single URL path segment.
 ///
 /// Only `:` is encoded (to `%3A`); every other character — including `.`, `-`,
@@ -156,6 +182,51 @@ mod tests {
                 "anthropic.claude-3-5-sonnet-20241022-v2:0"
             ),
             "https://bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-3-5-sonnet-20241022-v2%3A0/invoke"
+        );
+    }
+
+    // Bedrock Converse / ConverseStream URL helpers
+    #[test]
+    fn converse_url_basic() {
+        assert_eq!(
+            converse_url(
+                "https://bedrock-runtime.eu-central-1.amazonaws.com",
+                "eu.amazon.nova-pro-v1:0"
+            ),
+            "https://bedrock-runtime.eu-central-1.amazonaws.com/model/eu.amazon.nova-pro-v1%3A0/converse"
+        );
+    }
+
+    #[test]
+    fn converse_stream_url_basic() {
+        assert_eq!(
+            converse_stream_url(
+                "https://bedrock-runtime.eu-central-1.amazonaws.com",
+                "eu.amazon.nova-pro-v1:0"
+            ),
+            "https://bedrock-runtime.eu-central-1.amazonaws.com/model/eu.amazon.nova-pro-v1%3A0/converse-stream"
+        );
+    }
+
+    #[test]
+    fn converse_url_trims_trailing_slash() {
+        assert_eq!(
+            converse_url(
+                "https://bedrock-runtime.us-east-1.amazonaws.com///",
+                "us.meta.llama3-1-70b-instruct-v1:0"
+            ),
+            "https://bedrock-runtime.us-east-1.amazonaws.com/model/us.meta.llama3-1-70b-instruct-v1%3A0/converse"
+        );
+    }
+
+    #[test]
+    fn converse_stream_url_trims_trailing_slash() {
+        assert_eq!(
+            converse_stream_url(
+                "https://bedrock-runtime.us-east-1.amazonaws.com/",
+                "us.amazon.titan-text-premier-v1:0"
+            ),
+            "https://bedrock-runtime.us-east-1.amazonaws.com/model/us.amazon.titan-text-premier-v1%3A0/converse-stream"
         );
     }
 }

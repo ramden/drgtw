@@ -63,10 +63,16 @@ use drgtw_trace::{LlmMeta, TraceEntry, TraceKind};
 use std::collections::{BTreeMap, HashMap};
 use tracing::{info_span, Instrument as _};
 
+use crate::converse::{converse_event_to_sse, converse_to_openai, openai_to_converse, StreamXlateState};
 use crate::error::{ErrorFormat, ProxyError};
+use crate::eventstream::EventStreamDecoder;
 use crate::otel_enrich;
+use crate::sigv4::{sign_bedrock_request, SigV4Creds};
 use crate::sse_restore::SseRestorer;
-use crate::upstream::{bedrock_invoke_url, chat_completions_url, embeddings_url, messages_url};
+use crate::upstream::{
+    bedrock_invoke_url, chat_completions_url, converse_stream_url, converse_url, embeddings_url,
+    messages_url,
+};
 use crate::usage_tap::{usage_tap_stream, StreamUsage};
 use crate::ProxyState;
 
@@ -262,6 +268,12 @@ fn spec_accepts_format(spec: &EndpointSpec, conn_fmt: ApiFormat) -> bool {
     match spec.format {
         ApiFormat::Anthropic => {
             matches!(conn_fmt, ApiFormat::Anthropic | ApiFormat::Bedrock)
+        }
+        // The `/v1/chat/completions` endpoint (`OPENAI_SPEC`) accepts BOTH
+        // `open_ai` and `bedrock_converse` connections — a bedrock_converse
+        // connection serves the OpenAI surface via the Converse API.
+        ApiFormat::OpenAi => {
+            matches!(conn_fmt, ApiFormat::OpenAi | ApiFormat::BedrockConverse)
         }
         other => conn_fmt == other,
     }
@@ -527,24 +539,81 @@ async fn proxy_endpoint(
         for (i, connection) in candidates.iter().copied().enumerate() {
             let is_last = i == last_idx;
 
+            // For `bedrock_converse`, the wire body, URL, and signature all
+            // differ from the OpenAI passthrough and must be computed per
+            // candidate (the SigV4 signature binds to the resolved URL/host).
+            // The translation runs on the post-PII OpenAI bytes (design §5).
+            // `converse_*` holds the per-candidate body when this is a
+            // bedrock_converse connection; otherwise the shared upstream body
+            // is used verbatim.
+            let converse_wire: Option<(Bytes, String, bool)> =
+                if connection.format == ApiFormat::BedrockConverse {
+                    Some(build_converse_body(&upstream_body)?)
+                } else {
+                    None
+                };
+
             // URL + auth branch on the CONNECTION's format (not the endpoint
             // spec): a `bedrock` connection serves the `/v1/messages` surface
-            // but dispatches to native InvokeModel with bearer auth.
+            // but dispatches to native InvokeModel with bearer auth; a
+            // `bedrock_converse` connection serves the OpenAI surface but
+            // dispatches to Converse / ConverseStream.
             let url = match connection.format {
                 ApiFormat::OpenAi => chat_completions_url(&connection.base_url),
                 ApiFormat::Anthropic => messages_url(&connection.base_url),
                 ApiFormat::Bedrock => bedrock_invoke_url(&connection.base_url, &model),
+                ApiFormat::BedrockConverse => {
+                    // Stream flag from the translated body selects the endpoint;
+                    // it always equals the request-level `streaming` here.
+                    let (_, model_id, stream) =
+                        converse_wire.as_ref().expect("converse body present");
+                    if *stream {
+                        converse_stream_url(&connection.base_url, model_id)
+                    } else {
+                        converse_url(&connection.base_url, model_id)
+                    }
+                }
+            };
+
+            let wire_body = match &converse_wire {
+                Some((body, _, _)) => body.clone(),
+                None => upstream_body.clone(),
             };
 
             let mut builder = state
                 .client
                 .post(&url)
                 .header("Content-Type", "application/json")
-                .body(upstream_body.clone());
+                .body(wire_body.clone());
             builder = match connection.format {
                 ApiFormat::OpenAi | ApiFormat::Bedrock => {
                     builder.header("Authorization", format!("Bearer {}", connection.api_key))
                 }
+                // bedrock_converse: SigV4 sign when AWS creds are present;
+                // otherwise fall back to the Bedrock API key as a bearer token
+                // (design §2 auth resolution order). Signing binds to the exact
+                // post-translate wire bytes + URL + host.
+                ApiFormat::BedrockConverse => match sigv4_creds_for(connection) {
+                    Some(creds) => {
+                        let signed = sign_bedrock_request(
+                            "POST",
+                            &url,
+                            &[("content-type", "application/json")],
+                            &wire_body,
+                            &creds,
+                            SystemTime::now(),
+                        )
+                        .map_err(|e| ProxyError::FormatMismatch(e.to_string()))?;
+                        let mut b = builder;
+                        for (name, value) in signed {
+                            b = b.header(name, value);
+                        }
+                        b
+                    }
+                    None => {
+                        builder.header("Authorization", format!("Bearer {}", connection.api_key))
+                    }
+                },
                 ApiFormat::Anthropic => builder
                     .header("x-api-key", connection.api_key.clone())
                     .header("anthropic-version", &anthropic_version),
@@ -585,12 +654,14 @@ async fn proxy_endpoint(
         };
 
         let conn_name = connection.name.clone();
+        let conn_format = connection.format;
         let cost_table = state.cost_tables.get(&conn_name).cloned().unwrap_or_default();
 
         // 11. Relay (with PII restore) + capture usage + emit event.
         let ctx = RelayCtx {
             state: Arc::clone(&state),
             spec,
+            conn_format,
             request_id: request_id.clone(),
             key_id: key_id.clone(),
             model: model.clone(),
@@ -639,6 +710,11 @@ async fn proxy_endpoint(
 struct RelayCtx {
     state: Arc<ProxyState>,
     spec: &'static EndpointSpec,
+    /// Format of the connection that actually served this request. Differs from
+    /// `spec.format` for connections served on a foreign endpoint surface
+    /// (`bedrock_converse` on the OpenAI endpoint, native `bedrock` on the
+    /// messages endpoint). Drives Converse response/stream translation.
+    conn_format: ApiFormat,
     request_id: String,
     key_id: String,
     model: String,
@@ -716,6 +792,8 @@ async fn relay_with_usage(
         };
         let status_u16 = upstream_status.as_u16();
         let format = ctx.spec.body_format;
+        let is_converse = ctx.conn_format == ApiFormat::BedrockConverse;
+        let model_for_stream = ctx.model.clone();
         let raw_stream = upstream_resp.bytes_stream();
 
         // Trace at handoff: latency = time-to-handoff, status known, no body
@@ -745,6 +823,19 @@ async fn relay_with_usage(
             emit_event(&ctx, status_u16, input, output, cost, ttft_s, true);
         };
 
+        // bedrock_converse: the upstream body is a binary AWS eventstream. Wrap
+        // the raw stream in a re-framer that decodes each frame and emits OpenAI
+        // SSE bytes, so the existing OpenAiChat usage tap + SSE PII restorer run
+        // unchanged (design §5 streaming composition). The client always sees
+        // `text/event-stream`, never the upstream eventstream content-type.
+        if is_converse {
+            let reframed = reframe_converse_stream(raw_stream, model_for_stream);
+            let body =
+                Body::from_stream(usage_tap_stream(reframed, restorer, format, on_complete));
+            let sse_ct = HeaderValue::from_static("text/event-stream");
+            return Ok(build_response(upstream_status, Some(sse_ct), body));
+        }
+
         let body = Body::from_stream(usage_tap_stream(raw_stream, restorer, format, on_complete));
         return Ok(build_response(upstream_status, content_type, body));
     }
@@ -763,10 +854,31 @@ async fn relay_with_usage(
     let parsed_body: Option<serde_json::Value> =
         if is_json { serde_json::from_slice(&resp_bytes).ok() } else { None };
 
+    // bedrock_converse: translate the Converse response JSON into the OpenAI
+    // `chat.completion` shape BEFORE usage extraction + PII restore, so the
+    // existing OpenAI extractor reads `usage.prompt_tokens`/`completion_tokens`
+    // and the client receives an OpenAI-shaped body (design §5 non-streaming).
+    // `resp_bytes` is refreshed so the no-restore fallthrough returns the
+    // translated body.
+    let (parsed_body, resp_bytes) = match (ctx.conn_format, &parsed_body) {
+        (ApiFormat::BedrockConverse, Some(converse)) => {
+            let translated = converse_to_openai(converse, &ctx.model);
+            let bytes = serde_json::to_vec(&translated)
+                .map(Bytes::from)
+                .unwrap_or(resp_bytes);
+            (Some(translated), bytes)
+        }
+        _ => (parsed_body, resp_bytes),
+    };
+
     let (input, output) = parsed_body
         .as_ref()
         .and_then(|v| match ctx.spec.format {
-            ApiFormat::OpenAi => extract_usage_openai(v),
+            // OPENAI_SPEC serves both `open_ai` and `bedrock_converse`; once a
+            // Converse response is translated to OpenAI shape it carries
+            // `usage.prompt_tokens`/`completion_tokens`, so the OpenAI extractor
+            // reads token counts for both.
+            ApiFormat::OpenAi | ApiFormat::BedrockConverse => extract_usage_openai(v),
             // The messages endpoint serves both `anthropic` and `bedrock`
             // connections; native Bedrock InvokeModel returns the Anthropic
             // Messages JSON, so the same extractor reads input/output tokens.
@@ -828,6 +940,158 @@ async fn relay_with_usage(
     }
 
     Ok(build_response(upstream_status, content_type, Body::from(resp_bytes)))
+}
+
+/// Re-frame a binary AWS eventstream (Converse / ConverseStream) into an OpenAI
+/// SSE byte stream.
+///
+/// Each upstream chunk is fed to an [`EventStreamDecoder`]; every complete frame
+/// is parsed (JSON payload) and translated to OpenAI `chat.completion.chunk` SSE
+/// bytes via [`converse_event_to_sse`], threading a [`StreamXlateState`] so the
+/// synthesised id is stable and `[DONE]` is emitted once. The output type is
+/// `Result<Bytes, reqwest::Error>` so it drops straight into
+/// [`usage_tap_stream`] in place of the raw stream (design §5, §7).
+///
+/// A mid-stream decoder error (CRC / length / header violation) terminates the
+/// stream: the partial output already emitted is flushed and the stream ends
+/// (logged via `tracing`, never carrying body content — the PII-gateway
+/// invariant). Converse `*Exception` events are NOT decode errors; they decode
+/// cleanly and `converse_event_to_sse` turns them into an OpenAI error chunk
+/// plus `[DONE]`.
+fn reframe_converse_stream<S>(
+    upstream: S,
+    model: String,
+) -> impl futures::Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static
+where
+    S: futures::Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
+{
+    use futures::stream;
+    use futures::StreamExt as _;
+
+    struct State<S> {
+        upstream: std::pin::Pin<Box<S>>,
+        decoder: EventStreamDecoder,
+        xlate: StreamXlateState,
+        model: String,
+        finished: bool,
+    }
+
+    let init = State {
+        upstream: Box::pin(upstream),
+        decoder: EventStreamDecoder::new(),
+        xlate: StreamXlateState::new(),
+        model,
+        finished: false,
+    };
+
+    stream::unfold(init, |mut st| async move {
+        if st.finished {
+            return None;
+        }
+        loop {
+            match st.upstream.as_mut().next().await {
+                Some(Ok(bytes)) => {
+                    st.decoder.feed(&bytes);
+                    let frames = match st.decoder.drain() {
+                        Ok(frames) => frames,
+                        Err(e) => {
+                            // Fatal framing violation (or a non-eventstream
+                            // body, e.g. an HTML error page): close the SSE
+                            // stream COMPLETELY — synthesize `[DONE]` when the
+                            // terminal chunk never arrived. No body content is
+                            // logged (PII invariant).
+                            tracing::warn!(error = %e, "converse eventstream decode error; terminating stream");
+                            st.finished = true;
+                            let tail = st.xlate.finalize();
+                            if tail.is_empty() {
+                                return None;
+                            }
+                            return Some((Ok(Bytes::from(tail)), st));
+                        }
+                    };
+                    let mut out = Vec::new();
+                    for frame in frames {
+                        let Some(event_type) = frame
+                            .event_type
+                            .as_deref()
+                            .or(frame.exception_type.as_deref())
+                        else {
+                            continue;
+                        };
+                        let payload: serde_json::Value = serde_json::from_slice(&frame.payload)
+                            .unwrap_or_else(|e| {
+                                // Payload content is never logged (PII invariant).
+                                tracing::warn!(error = %e, event_type, "malformed converse event payload JSON");
+                                serde_json::Value::Null
+                            });
+                        out.extend(converse_event_to_sse(
+                            event_type,
+                            &payload,
+                            &st.model,
+                            &mut st.xlate,
+                        ));
+                    }
+                    if out.is_empty() {
+                        // No complete frame yet (or only no-op events); keep
+                        // pulling rather than yielding an empty chunk.
+                        continue;
+                    }
+                    return Some((Ok(Bytes::from(out)), st));
+                }
+                Some(Err(e)) => {
+                    // Upstream transport error mid-stream: surface it. The tap
+                    // treats an Err item as terminal; reqwest's byte stream is
+                    // fused, so a re-poll would yield `None` and end this stream
+                    // via the flush arm below.
+                    return Some((Err(e), st));
+                }
+                None => {
+                    // Upstream ended. Flush any final buffered frames.
+                    st.finished = true;
+                    let frames = match st.decoder.drain() {
+                        Ok(frames) => frames,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "converse eventstream decode error at end of stream");
+                            let tail = st.xlate.finalize();
+                            if tail.is_empty() {
+                                return None;
+                            }
+                            return Some((Ok(Bytes::from(tail)), st));
+                        }
+                    };
+                    let mut out = Vec::new();
+                    for frame in frames {
+                        let Some(event_type) = frame
+                            .event_type
+                            .as_deref()
+                            .or(frame.exception_type.as_deref())
+                        else {
+                            continue;
+                        };
+                        let payload: serde_json::Value = serde_json::from_slice(&frame.payload)
+                            .unwrap_or_else(|e| {
+                                // Payload content is never logged (PII invariant).
+                                tracing::warn!(error = %e, event_type, "malformed converse event payload JSON");
+                                serde_json::Value::Null
+                            });
+                        out.extend(converse_event_to_sse(
+                            event_type,
+                            &payload,
+                            &st.model,
+                            &mut st.xlate,
+                        ));
+                    }
+                    // Upstream ended without a terminal `metadata` event
+                    // (disconnect): complete the SSE stream for the client.
+                    out.extend(st.xlate.finalize());
+                    if out.is_empty() {
+                        return None;
+                    }
+                    return Some((Ok(Bytes::from(out)), st));
+                }
+            }
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1046,6 +1310,44 @@ fn is_retriable_status(status: u16) -> bool {
     matches!(status, 502 | 503 | 504 | 429)
 }
 
+/// Resolve the per-connection SigV4 material for a `bedrock_converse` connection.
+///
+/// Returns `Some` only when BOTH the access-key id and the secret access key are
+/// present (config validation guarantees `region` is set in that case, and that
+/// a session token never appears without the key pair). A connection with only
+/// an `api_key` returns `None`, signalling bearer auth.
+fn sigv4_creds_for(connection: &Connection) -> Option<SigV4Creds> {
+    match (
+        connection.aws_access_key_id.as_deref(),
+        connection.aws_secret_access_key.as_deref(),
+    ) {
+        (Some(akid), Some(secret)) if !akid.is_empty() && !secret.is_empty() => Some(SigV4Creds {
+            access_key_id: akid.to_owned(),
+            secret_access_key: secret.to_owned(),
+            session_token: connection
+                .aws_session_token
+                .as_deref()
+                .filter(|t| !t.is_empty())
+                .map(str::to_owned),
+            region: connection.region.clone().unwrap_or_default(),
+        }),
+        _ => None,
+    }
+}
+
+/// Translate the (already-pseudonymized) OpenAI body bytes into a serialised
+/// Converse request body, returning the bytes, the lifted model id, and the
+/// stream flag. Surfaces a 400-class OpenAI error on translation failure (e.g.
+/// non-text content) before any upstream call.
+fn build_converse_body(openai_body: &[u8]) -> Result<(Bytes, String, bool), ProxyError> {
+    let value: serde_json::Value =
+        serde_json::from_slice(openai_body).unwrap_or(serde_json::Value::Null);
+    let (converse, model_id, stream) =
+        openai_to_converse(&value).map_err(|e| ProxyError::FormatMismatch(e.to_string()))?;
+    let bytes = serde_json::to_vec(&converse).map_err(|e| ProxyError::FormatMismatch(e.to_string()))?;
+    Ok((Bytes::from(bytes), model_id, stream))
+}
+
 /// Build the `drgtw_debug` object for the demo debug header.
 ///
 /// * `pseudonymized_request` — the rewritten request JSON exactly as sent
@@ -1113,7 +1415,9 @@ fn format_mismatch_error(spec: &EndpointSpec, actual: ApiFormat, model: &str) ->
     // served via ANTHROPIC_SPEC, so treat any non-OpenAI spec as the messages
     // surface and point a mismatch back at /v1/chat/completions.
     let other_endpoint = match spec.format {
-        ApiFormat::OpenAi => "/v1/messages",
+        // `spec.format` is only ever the endpoint's own format; bedrock_converse
+        // is served via OPENAI_SPEC so it folds into the OpenAi arm.
+        ApiFormat::OpenAi | ApiFormat::BedrockConverse => "/v1/messages",
         ApiFormat::Anthropic | ApiFormat::Bedrock => "/v1/chat/completions",
     };
     ProxyError::FormatMismatch(format!(
@@ -1123,7 +1427,8 @@ fn format_mismatch_error(spec: &EndpointSpec, actual: ApiFormat, model: &str) ->
 
 fn pii_unavailable(spec: &EndpointSpec, detail: String) -> ProxyError {
     match spec.format {
-        ApiFormat::OpenAi => ProxyError::PiiUnavailable(detail),
+        // OpenAi and bedrock_converse both serve the OpenAI-shaped chat surface.
+        ApiFormat::OpenAi | ApiFormat::BedrockConverse => ProxyError::PiiUnavailable(detail),
         // Anthropic and Bedrock both serve the messages endpoint → anthropic body.
         ApiFormat::Anthropic | ApiFormat::Bedrock => ProxyError::PiiUnavailableAnthropic(detail),
     }
@@ -1154,6 +1459,7 @@ fn format_name(fmt: ApiFormat) -> &'static str {
         ApiFormat::OpenAi => "open_ai",
         ApiFormat::Anthropic => "anthropic",
         ApiFormat::Bedrock => "bedrock",
+        ApiFormat::BedrockConverse => "bedrock_converse",
     }
 }
 

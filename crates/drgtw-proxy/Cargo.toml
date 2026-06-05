@@ -14,7 +14,10 @@ drgtw-pii.workspace = true
 drgtw-trace.workspace = true
 drgtw-vault.workspace = true
 
+aws-sigv4.workspace = true
+aws-credential-types.workspace = true
 axum.workspace = true
+crc32fast.workspace = true
 bytes.workspace = true
 futures.workspace = true
 hex.workspace = true
@@ -34,6 +37,8 @@ wiremock.workspace = true
 tower.workspace = true
 tempfile.workspace = true
 regex.workspace = true
+crc32fast.workspace = true
+serde_json.workspace = true
 http-body-util = "0.1"
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 tracing-subscriber.workspace = true

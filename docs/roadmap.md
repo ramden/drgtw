@@ -29,10 +29,23 @@ Shipped in this release:
 - **Multi-arch container images** — releases now publish `linux/amd64` and
   `linux/arm64` images under one manifest.
 
-## Planned (v0.0.3+)
+## v0.0.3 (in progress)
 
-- Bedrock: SigV4 authentication and native streaming
-  (`InvokeModelWithResponseStream`, AWS event-stream framing).
+- **Bedrock Converse + SigV4** — `format = "bedrock_converse"` connections
+  serve the OpenAI chat-completions surface against Bedrock's Converse and
+  ConverseStream APIs (Nova, Llama, Titan, Anthropic — any Converse model).
+  Auth is SigV4 (per-connection AWS credentials, `${ENV_VAR}`-expanded) or a
+  Bedrock API key (bearer). Streaming decodes AWS event-stream framing and
+  re-emits OpenAI SSE, so PII restore, usage capture, and TTFT metrics work
+  unchanged.
+- **Usage-event metadata strip** — body `metadata` is removed from the
+  forwarded request after harvesting (Azure-style upstreams reject unknown
+  params with 400).
+
+## Planned (v0.0.4+)
+
+- Native InvokeModel streaming (`InvokeModelWithResponseStream`) for the
+  Anthropic-surface `format = "bedrock"` path.
 - In-memory budgets keyed by attribution metadata (per-agent / per-session
   spend caps, building on the metadata passthrough above).
 - Usage-event batching and at-least-once delivery for the webhook sink.

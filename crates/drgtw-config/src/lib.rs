@@ -110,6 +110,21 @@ pub struct Connection {
     /// Defaults to empty (no cost tracking for this connection).
     #[serde(default)]
     pub model_costs: HashMap<String, ModelCost>,
+
+    // --- SigV4 credentials (only meaningful for `bedrock_converse`) ---
+    /// AWS region, e.g. `"eu-central-1"`. Required when SigV4 creds are present.
+    /// Supports `${ENV_VAR}` references, resolved at load.
+    #[serde(default)]
+    pub region: Option<String>,
+    /// SigV4 access key id. `${ENV_VAR}` expanded at load.
+    #[serde(default)]
+    pub aws_access_key_id: Option<String>,
+    /// SigV4 secret access key. `${ENV_VAR}` expanded at load.
+    #[serde(default)]
+    pub aws_secret_access_key: Option<String>,
+    /// Optional STS session token. `${ENV_VAR}` expanded at load.
+    #[serde(default)]
+    pub aws_session_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -122,6 +137,11 @@ pub enum ApiFormat {
     /// `base_url` carries NO `/v1` suffix
     /// (e.g. `https://bedrock-runtime.eu-central-1.amazonaws.com`).
     Bedrock,
+    /// AWS Bedrock Converse / ConverseStream over the OpenAI client surface
+    /// (`/v1/chat/completions`). Auth is SigV4 (static creds) or bearer
+    /// (`api_key`). The URL builder appends `/model/{model}/converse[-stream]`,
+    /// so the `base_url` carries NO `/v1` suffix.
+    BedrockConverse,
 }
 
 /// Per-virtual-key spend budget (WP 8.1).
@@ -563,6 +583,24 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
 
         let field_base_url = format!("connections[{}].base_url", conn.name);
         conn.base_url = resolve_env_vars(&conn.base_url, &field_base_url)?;
+
+        // SigV4 credential fields (only meaningful for bedrock_converse).
+        if let Some(region) = &conn.region {
+            let field = format!("connections[{}].region", conn.name);
+            conn.region = Some(resolve_env_vars(region, &field)?);
+        }
+        if let Some(akid) = &conn.aws_access_key_id {
+            let field = format!("connections[{}].aws_access_key_id", conn.name);
+            conn.aws_access_key_id = Some(resolve_env_vars(akid, &field)?);
+        }
+        if let Some(secret) = &conn.aws_secret_access_key {
+            let field = format!("connections[{}].aws_secret_access_key", conn.name);
+            conn.aws_secret_access_key = Some(resolve_env_vars(secret, &field)?);
+        }
+        if let Some(token) = &conn.aws_session_token {
+            let field = format!("connections[{}].aws_session_token", conn.name);
+            conn.aws_session_token = Some(resolve_env_vars(token, &field)?);
+        }
     }
 
     // 3b. Env-var resolution on pii.ner.model_dir.
@@ -683,8 +721,50 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
         // Absolute http(s) URL, no query or fragment.
         validate_base_url(&conn.base_url, &conn.name)?;
 
-        // api_key non-empty after resolution.
-        if conn.api_key.is_empty() {
+        // SigV4 credential coupling (only meaningful for bedrock_converse, but
+        // the structural rules are validated whenever the fields are present).
+        let akid = conn.aws_access_key_id.as_deref().filter(|s| !s.is_empty());
+        let secret = conn
+            .aws_secret_access_key
+            .as_deref()
+            .filter(|s| !s.is_empty());
+        let token = conn.aws_session_token.as_deref().filter(|s| !s.is_empty());
+        let has_region = conn.region.as_deref().is_some_and(|s| !s.is_empty());
+        let has_sigv4 = akid.is_some() && secret.is_some();
+
+        // Partial SigV4 creds: exactly one of access-key / secret-key set.
+        if akid.is_some() != secret.is_some() {
+            return Err(ConfigError::Invalid(format!(
+                "connections[{}]: aws_access_key_id and aws_secret_access_key must be set together",
+                conn.name
+            )));
+        }
+        // Session token without the key pair.
+        if token.is_some() && !has_sigv4 {
+            return Err(ConfigError::Invalid(format!(
+                "connections[{}]: aws_session_token requires aws_access_key_id and aws_secret_access_key",
+                conn.name
+            )));
+        }
+        // Region required when SigV4 creds are present.
+        if has_sigv4 && !has_region {
+            return Err(ConfigError::Invalid(format!(
+                "connections[{}]: region is required for SigV4 Bedrock signing",
+                conn.name
+            )));
+        }
+
+        if conn.format == ApiFormat::BedrockConverse {
+            // A bedrock_converse connection authenticates with EITHER SigV4
+            // creds OR a non-empty bearer api_key.
+            if !has_sigv4 && conn.api_key.is_empty() {
+                return Err(ConfigError::Invalid(format!(
+                    "connections[{}]: bedrock_converse requires either aws_access_key_id+aws_secret_access_key or api_key",
+                    conn.name
+                )));
+            }
+        } else if conn.api_key.is_empty() {
+            // Every other format keeps the universal non-empty api_key rule.
             return Err(ConfigError::Invalid(format!(
                 "connections[{}].api_key must not be empty",
                 conn.name
@@ -3104,5 +3184,207 @@ export_interval_ms = 0
 "#;
         let err = load_toml(toml).expect_err("zero interval rejected");
         assert!(matches!(err, ConfigError::Invalid(_)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Bedrock Converse format + SigV4 credentials (0.0.3)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_bedrock_converse_format_deserializes() {
+        let toml = r#"
+[[connections]]
+name = "bedrock-converse-bearer"
+base_url = "https://bedrock-runtime.us-east-1.amazonaws.com"
+api_key = "bedrock-bearer-token"
+format = "bedrock_converse"
+region = "us-east-1"
+models = ["us.amazon.titan-text-premier-v1:0"]
+"#;
+        let cfg = load_toml(toml).expect("bedrock_converse should load");
+        assert_eq!(cfg.connections[0].format, ApiFormat::BedrockConverse);
+        assert_eq!(cfg.connections[0].region.as_deref(), Some("us-east-1"));
+    }
+
+    #[test]
+    fn test_bedrock_converse_sigv4_creds_deserialize() {
+        let toml = r#"
+[[connections]]
+name = "bc-sigv4"
+base_url = "https://bedrock-runtime.eu-central-1.amazonaws.com"
+api_key = ""
+format = "bedrock_converse"
+region = "eu-central-1"
+aws_access_key_id = "AKIDEXAMPLE"
+aws_secret_access_key = "secret-value"
+models = ["eu.amazon.nova-pro-v1:0"]
+"#;
+        let cfg = load_toml(toml).expect("sigv4-only converse should load");
+        assert_eq!(
+            cfg.connections[0].aws_access_key_id.as_deref(),
+            Some("AKIDEXAMPLE")
+        );
+        assert_eq!(
+            cfg.connections[0].aws_secret_access_key.as_deref(),
+            Some("secret-value")
+        );
+        assert!(cfg.connections[0].aws_session_token.is_none());
+    }
+
+    #[test]
+    fn test_bedrock_converse_sigv4_env_expansion() {
+        unsafe {
+            std::env::set_var("DRGTW_TEST_AWS_AKID", "AKIDFROMENV");
+            std::env::set_var("DRGTW_TEST_AWS_SECRET", "SECRETFROMENV");
+            std::env::set_var("DRGTW_TEST_AWS_TOKEN", "TOKENFROMENV");
+            std::env::set_var("DRGTW_TEST_AWS_REGION", "eu-west-1");
+        }
+        let toml = r#"
+[[connections]]
+name = "bc-env"
+base_url = "https://bedrock-runtime.eu-west-1.amazonaws.com"
+api_key = ""
+format = "bedrock_converse"
+region = "${DRGTW_TEST_AWS_REGION}"
+aws_access_key_id = "${DRGTW_TEST_AWS_AKID}"
+aws_secret_access_key = "${DRGTW_TEST_AWS_SECRET}"
+aws_session_token = "${DRGTW_TEST_AWS_TOKEN}"
+"#;
+        let cfg = load_toml(toml).expect("env expansion should load");
+        assert_eq!(cfg.connections[0].region.as_deref(), Some("eu-west-1"));
+        assert_eq!(
+            cfg.connections[0].aws_access_key_id.as_deref(),
+            Some("AKIDFROMENV")
+        );
+        assert_eq!(
+            cfg.connections[0].aws_secret_access_key.as_deref(),
+            Some("SECRETFROMENV")
+        );
+        assert_eq!(
+            cfg.connections[0].aws_session_token.as_deref(),
+            Some("TOKENFROMENV")
+        );
+        unsafe {
+            std::env::remove_var("DRGTW_TEST_AWS_AKID");
+            std::env::remove_var("DRGTW_TEST_AWS_SECRET");
+            std::env::remove_var("DRGTW_TEST_AWS_TOKEN");
+            std::env::remove_var("DRGTW_TEST_AWS_REGION");
+        }
+    }
+
+    #[test]
+    fn test_bedrock_converse_no_auth_rejected() {
+        // Neither SigV4 creds nor a non-empty api_key.
+        let toml = r#"
+[[connections]]
+name = "bc-noauth"
+base_url = "https://bedrock-runtime.us-east-1.amazonaws.com"
+api_key = ""
+format = "bedrock_converse"
+region = "us-east-1"
+"#;
+        let err = load_toml(toml).expect_err("no auth must be rejected");
+        match err {
+            ConfigError::Invalid(msg) => {
+                assert!(msg.contains("bedrock_converse requires either"), "{msg}")
+            }
+            other => panic!("unexpected: {other}"),
+        }
+    }
+
+    #[test]
+    fn test_bedrock_converse_partial_sigv4_creds_rejected() {
+        // Only access key, no secret.
+        let toml = r#"
+[[connections]]
+name = "bc-partial"
+base_url = "https://bedrock-runtime.us-east-1.amazonaws.com"
+api_key = ""
+format = "bedrock_converse"
+region = "us-east-1"
+aws_access_key_id = "AKIDEXAMPLE"
+"#;
+        let err = load_toml(toml).expect_err("partial creds rejected");
+        match err {
+            ConfigError::Invalid(msg) => assert!(msg.contains("must be set together"), "{msg}"),
+            other => panic!("unexpected: {other}"),
+        }
+    }
+
+    #[test]
+    fn test_bedrock_converse_sigv4_without_region_rejected() {
+        let toml = r#"
+[[connections]]
+name = "bc-noregion"
+base_url = "https://bedrock-runtime.us-east-1.amazonaws.com"
+api_key = ""
+format = "bedrock_converse"
+aws_access_key_id = "AKIDEXAMPLE"
+aws_secret_access_key = "secret-value"
+"#;
+        let err = load_toml(toml).expect_err("missing region rejected");
+        match err {
+            ConfigError::Invalid(msg) => {
+                assert!(msg.contains("region is required for SigV4"), "{msg}")
+            }
+            other => panic!("unexpected: {other}"),
+        }
+    }
+
+    #[test]
+    fn test_bedrock_converse_session_token_without_keys_rejected() {
+        let toml = r#"
+[[connections]]
+name = "bc-tokenonly"
+base_url = "https://bedrock-runtime.us-east-1.amazonaws.com"
+api_key = "bearer-token"
+format = "bedrock_converse"
+region = "us-east-1"
+aws_session_token = "orphan-token"
+"#;
+        let err = load_toml(toml).expect_err("session token without keys rejected");
+        match err {
+            ConfigError::Invalid(msg) => assert!(msg.contains("aws_session_token requires"), "{msg}"),
+            other => panic!("unexpected: {other}"),
+        }
+    }
+
+    #[test]
+    fn test_bedrock_converse_sigv4_only_empty_api_key_ok() {
+        // The universal non-empty api_key rule is relaxed for sigv4-only
+        // bedrock_converse connections.
+        let toml = r#"
+[[connections]]
+name = "bc-sigv4only"
+base_url = "https://bedrock-runtime.eu-central-1.amazonaws.com"
+api_key = ""
+format = "bedrock_converse"
+region = "eu-central-1"
+aws_access_key_id = "AKIDEXAMPLE"
+aws_secret_access_key = "secret-value"
+"#;
+        let cfg = load_toml(toml).expect("sigv4-only empty api_key is valid");
+        assert_eq!(cfg.connections[0].format, ApiFormat::BedrockConverse);
+        assert!(cfg.connections[0].api_key.is_empty());
+    }
+
+    #[test]
+    fn test_openai_still_requires_nonempty_api_key() {
+        // The relaxation is scoped to bedrock_converse: open_ai still rejects
+        // an empty api_key.
+        let toml = r#"
+[[connections]]
+name = "oai-empty"
+base_url = "https://api.example.com/v1"
+api_key = ""
+format = "open_ai"
+"#;
+        let err = load_toml(toml).expect_err("open_ai empty key rejected");
+        match err {
+            ConfigError::Invalid(msg) => {
+                assert!(msg.contains("connections[oai-empty].api_key"), "{msg}")
+            }
+            other => panic!("unexpected: {other}"),
+        }
     }
 }

@@ -13,10 +13,13 @@ use drgtw_events::{EventSink, ModelCost};
 use drgtw_keys::{BudgetTracker, KeyStore, RateLimiter};
 use drgtw_pii::{EntityStore, PiiEngine};
 
+mod converse;
 mod error;
+mod eventstream;
 mod handlers;
 mod mcp;
 pub mod otel_enrich;
+mod sigv4;
 mod sse_restore;
 mod state;
 mod upstream;

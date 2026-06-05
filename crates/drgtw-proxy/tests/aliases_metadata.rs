@@ -54,6 +54,10 @@ fn openai_conn(name: &str, base: &str, models: Vec<&str>, costs: Vec<(&str, f64,
         format: ApiFormat::OpenAi,
         models: models.into_iter().map(Into::into).collect(),
         model_costs,
+        region: None,
+        aws_access_key_id: None,
+        aws_secret_access_key: None,
+        aws_session_token: None,
     }
 }
 

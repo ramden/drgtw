@@ -78,8 +78,9 @@ models = [
 # models   = ["gpt-4o", "gpt-4o-mini"]
 
 # ---------------------------------------------------------------------------
-# AWS Bedrock — bearer auth (Bedrock API key), no SigV4. The region is in the
-# hostname.  Two ways to connect; see docs/config-reference.md#aws-bedrock.
+# AWS Bedrock — three ways to connect; see docs/config-reference.md#aws-bedrock.
+# The region is encoded in the hostname. Options A and B use a Bedrock API key
+# (bearer); Option C (Converse) accepts SigV4 static creds OR a bearer key.
 #
 # Option A (recommended): OpenAI-compatible endpoint. base_url INCLUDES /v1.
 # Supports streaming (SSE) and non-streaming. Covers Anthropic + OpenAI-OSS.
@@ -106,6 +107,36 @@ models = [
 # [connections.model_costs."anthropic.claude-3-5-sonnet-20241022-v2:0"]
 # input_per_1m  = 3.00
 # output_per_1m = 15.00
+#
+# Option C: Converse / ConverseStream. base_url has NO /v1. Callers use the
+# OpenAI body via /v1/chat/completions. Covers Nova/Llama/Titan + Anthropic and
+# SUPPORTS stream:true. Auth is SigV4 when aws_* creds are set, else the
+# api_key as a bearer token.
+#
+# SigV4 (static AWS creds):
+# [[connections]]
+# name    = "bedrock-converse-sigv4"
+# base_url = "https://bedrock-runtime.eu-central-1.amazonaws.com"
+# api_key  = ""                                    # unused under SigV4
+# format   = "bedrock_converse"
+# region   = "eu-central-1"                         # required with SigV4 creds
+# aws_access_key_id     = "${AWS_ACCESS_KEY_ID}"
+# aws_secret_access_key = "${AWS_SECRET_ACCESS_KEY}"
+# aws_session_token     = "${AWS_SESSION_TOKEN}"    # optional (STS)
+# models   = ["eu.amazon.nova-pro-v1:0", "eu.meta.llama3-1-70b-instruct-v1:0"]
+#
+# [connections.model_costs."eu.amazon.nova-pro-v1:0"]
+# input_per_1m  = 0.80
+# output_per_1m = 3.20
+#
+# Bearer (Bedrock API key) Converse:
+# [[connections]]
+# name    = "bedrock-converse-bearer"
+# base_url = "https://bedrock-runtime.us-east-1.amazonaws.com"
+# api_key  = "${AWS_BEARER_TOKEN_BEDROCK}"
+# format   = "bedrock_converse"
+# region   = "us-east-1"
+# models   = ["us.amazon.titan-text-premier-v1:0"]
 
 # ---------------------------------------------------------------------------
 # [[virtual_keys]] — credentials issued to downstream callers.

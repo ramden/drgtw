@@ -73,6 +73,10 @@ fn openai_config(
             format: ApiFormat::OpenAi,
             models: vec!["text-embedding-3-small".into(), "gpt-4o".into()],
             model_costs,
+            region: None,
+            aws_access_key_id: None,
+            aws_secret_access_key: None,
+            aws_session_token: None,
         }],
         virtual_keys: vec![VirtualKey {
             key: VKEY.into(),
