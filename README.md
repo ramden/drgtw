@@ -878,7 +878,12 @@ cd training && uv sync --extra dev && uv run pytest
 
 ## Roadmap
 
-- Observability: OpenTelemetry traces and Prometheus-style metrics.
+See [docs/roadmap.md](docs/roadmap.md) for the full release-by-release plan.
+
+Next up (v0.0.3+):
+
+- Bedrock: SigV4 auth and native streaming (AWS event-stream framing).
+- In-memory budgets keyed by attribution metadata (per-agent / per-session).
 - Usage-event batching and at-least-once delivery for the webhook sink.
 - Response-side sanitization of newly introduced PII.
 - Cross-request placeholder restore for *streaming* responses (the persistent
