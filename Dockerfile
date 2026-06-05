@@ -65,6 +65,8 @@ COPY crates/drgtw-pii/Cargo.toml     crates/drgtw-pii/Cargo.toml
 COPY crates/drgtw-proxy/Cargo.toml   crates/drgtw-proxy/Cargo.toml
 COPY crates/drgtw-events/Cargo.toml  crates/drgtw-events/Cargo.toml
 COPY crates/drgtw-vault/Cargo.toml   crates/drgtw-vault/Cargo.toml
+COPY crates/drgtw-mcp/Cargo.toml     crates/drgtw-mcp/Cargo.toml
+COPY crates/drgtw-trace/Cargo.toml   crates/drgtw-trace/Cargo.toml
 
 RUN set -e; \
     for member in \
@@ -77,6 +79,8 @@ RUN set -e; \
         crates/drgtw-proxy \
         crates/drgtw-events \
         crates/drgtw-vault \
+        crates/drgtw-mcp \
+        crates/drgtw-trace \
     ; do \
         mkdir -p "$member/src"; \
         printf 'pub fn _stub(){}' > "$member/src/lib.rs"; \
@@ -160,7 +164,7 @@ EXPOSE 8080
 # OCI image labels.
 LABEL org.opencontainers.image.title="drgtw" \
       org.opencontainers.image.description="Privacy-first LLM gateway — pseudonymizes PII before forwarding to OpenAI/Anthropic providers" \
-      org.opencontainers.image.source="https://github.com/example/drgtw" \
+      org.opencontainers.image.source="https://github.com/ramden/drgtw" \
       org.opencontainers.image.licenses="Apache-2.0"
 
 ENTRYPOINT ["drgtw"]
