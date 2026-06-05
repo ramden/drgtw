@@ -150,8 +150,9 @@ models = ["gpt-4o-mini"]
 # metadata that is copied into the usage event's `metadata` field.  Two
 # sources are merged (a colliding key from a header overrides the body):
 #   1. The request body's top-level `metadata` object (OpenAI / Anthropic
-#      `metadata`, incl. Anthropic `user_id`).  The body is forwarded
-#      unchanged.  Non-string values are JSON-stringified.
+#      `metadata`, incl. Anthropic `user_id`).  After harvesting, the object
+#      is STRIPPED from the forwarded body (Azure-style upstreams reject
+#      unknown params with 400).  Non-string values are JSON-stringified.
 #   2. Request headers prefixed `x-drgtw-meta-` — e.g.
 #      `x-drgtw-meta-session-id: abc` becomes `session-id = "abc"`.  These
 #      headers are STRIPPED before forwarding upstream (never leak to the

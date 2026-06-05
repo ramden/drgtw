@@ -404,9 +404,10 @@ async fn test_header_metadata_captured_and_not_leaked_upstream() {
     );
 }
 
-/// Body `metadata` is captured WITHOUT mutating the forwarded body.
+/// Body `metadata` is harvested into the event, then stripped from the
+/// forwarded body (drop_params: Azure-style upstreams 400 on unknown params).
 #[tokio::test]
-async fn test_body_metadata_captured_without_body_mutation() {
+async fn test_body_metadata_captured_and_stripped_from_upstream() {
     let upstream = MockServer::start().await;
     let sink = MockServer::start().await;
     let (bodies, _) = mount_chat_upstream(&upstream, ok_usage_response()).await;
@@ -420,10 +421,13 @@ async fn test_body_metadata_captured_without_body_mutation() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // Body forwarded unchanged (metadata object still present, untouched).
+    // The `metadata` object is STRIPPED from the upstream body after harvest
+    // (Azure-style OpenAI-compatible upstreams reject unknown params with
+    // 400); the rest of the body is forwarded intact.
     let bodies = bodies.lock().unwrap().clone();
-    assert_eq!(bodies[0]["metadata"]["user_id"], "u1");
-    assert_eq!(bodies[0]["metadata"]["count"], 3);
+    assert!(bodies[0].get("metadata").is_none(), "metadata must not reach upstream");
+    assert_eq!(bodies[0]["model"], "gpt-4o");
+    assert!(bodies[0]["messages"].is_array());
 
     wait_for_events(&captured, 1).await;
     let events = captured.lock().unwrap().clone();

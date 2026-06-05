@@ -160,8 +160,9 @@ fn truncate_chars(s: &str, max: usize) -> String {
 ///
 /// Sources, merged with **headers winning on key collision**:
 ///   1. The request body's top-level `metadata` object — string values are
-///      taken verbatim, non-string values are JSON-stringified. The body is
-///      NOT modified (we only read `parsed`).
+///      taken verbatim, non-string values are JSON-stringified. This function
+///      only reads `parsed`; the caller strips the `metadata` object before
+///      forwarding (Azure-style upstreams reject unknown params with 400).
 ///   2. Request headers prefixed `x-drgtw-meta-` — the prefix is stripped and
 ///      the remainder lowercased to form the key.
 ///
@@ -357,8 +358,17 @@ async fn proxy_endpoint(
         serde_json::from_slice(&raw_body).unwrap_or(serde_json::Value::Null);
 
     // Capture attribution metadata from the ORIGINAL body + inbound headers
-    // before any rewrite. The body is not modified by this read.
+    // before any rewrite.
     let metadata = collect_metadata(&parts.headers, &parsed);
+
+    // Drop the harvested body `metadata` object before forwarding: several
+    // OpenAI-compatible upstreams (e.g. Azure OpenAI) reject unknown params
+    // with 400. Attribution flows through the usage event, never the
+    // provider; `x-drgtw-meta-*` headers are the provider-neutral channel.
+    let body_metadata_stripped = parsed
+        .as_object_mut()
+        .map(|obj| obj.remove("metadata").is_some())
+        .unwrap_or(false);
 
     // Extract the caller-supplied model, then resolve it through the global
     // `[model_aliases]` table (one level only) and rewrite the body `model`
@@ -475,11 +485,12 @@ async fn proxy_endpoint(
         .map_err(|e| pii_unavailable(spec, e.to_string()))?;
         let rewritten = rewritten.unwrap_or_else(|| raw_for_fallback.to_vec());
         (Bytes::from(rewritten), Arc::new(map))
-    } else if model_rewritten || bedrock_transform {
-        // PII off but the body was rewritten (alias resolution and/or the
-        // Bedrock model-strip + anthropic_version injection): re-serialize so
-        // the upstream sees the rewritten body. Falls back to the original
-        // bytes if serialization somehow fails.
+    } else if model_rewritten || bedrock_transform || body_metadata_stripped {
+        // PII off but the body was rewritten (alias resolution, the Bedrock
+        // model-strip + anthropic_version injection, and/or the attribution
+        // `metadata` strip): re-serialize so the upstream sees the rewritten
+        // body. Falls back to the original bytes if serialization somehow
+        // fails.
         let rewritten = serde_json::to_vec(&parsed).unwrap_or_else(|_| raw_body.to_vec());
         (Bytes::from(rewritten), Arc::new(EntityMap::new()))
     } else {
@@ -1277,6 +1288,14 @@ async fn embeddings_inner(
     // Capture attribution metadata from the original body + inbound headers.
     let metadata = collect_metadata(&parts.headers, &parsed);
 
+    // Drop the harvested body `metadata` object before forwarding (same
+    // rationale as the chat path: Azure-style upstreams 400 on unknown params;
+    // attribution lives in the event).
+    let body_metadata_stripped = parsed
+        .as_object_mut()
+        .map(|obj| obj.remove("metadata").is_some())
+        .unwrap_or(false);
+
     // Resolve the model through the global alias table (one level) and rewrite
     // the body so routing, allowlist, cost, and usage all see the resolved name.
     let requested_model = parsed
@@ -1333,13 +1352,14 @@ async fn embeddings_inner(
         .map_err(|e| ProxyError::PiiUnavailable(e.to_string()))?;
         let rewritten = rewritten.unwrap_or_else(|| raw_for_fallback.to_vec());
         (Bytes::from(rewritten), used)
-    } else if model_rewritten {
-        // PII off but the model alias was resolved: re-serialize so the
-        // upstream sees the resolved model.
+    } else if model_rewritten || body_metadata_stripped {
+        // PII off but the body was rewritten (alias resolution and/or the
+        // attribution `metadata` strip): re-serialize so the upstream sees
+        // the rewritten body.
         let rewritten = serde_json::to_vec(&parsed).unwrap_or_else(|_| raw_body.to_vec());
         (Bytes::from(rewritten), false)
     } else {
-        // PII off, no alias rewrite → byte-identical passthrough.
+        // PII off, no rewrite → byte-identical passthrough.
         (raw_body, false)
     };
 
