@@ -228,6 +228,8 @@ fn build_config(mock_base_url: &str, pii_enabled: bool) -> Arc<Config> {
         fallback: Default::default(),
         mcp_servers: Default::default(),
         tracing: Default::default(),
+        model_aliases: Default::default(),
+        otel: Default::default(),
     })
 }
 

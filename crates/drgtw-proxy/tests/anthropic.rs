@@ -61,6 +61,8 @@ fn tiny_max_body_anthropic_config(mock_base_url: &str) -> Arc<Config> {
         fallback: Default::default(),
         mcp_servers: Default::default(),
         tracing: drgtw_config::TracingConfig { enabled: false, ..Default::default() },
+        model_aliases: Default::default(),
+        otel: Default::default(),
     })
 }
 
@@ -90,6 +92,8 @@ fn anthropic_config(mock_base_url: &str) -> Arc<Config> {
         fallback: Default::default(),
         mcp_servers: Default::default(),
         tracing: drgtw_config::TracingConfig { enabled: false, ..Default::default() },
+        model_aliases: Default::default(),
+        otel: Default::default(),
     })
 }
 
@@ -136,6 +140,8 @@ fn dual_config(openai_base: &str, anthropic_base: &str) -> Arc<Config> {
         fallback: Default::default(),
         mcp_servers: Default::default(),
         tracing: drgtw_config::TracingConfig { enabled: false, ..Default::default() },
+        model_aliases: Default::default(),
+        otel: Default::default(),
     })
 }
 
@@ -564,6 +570,8 @@ async fn test_messages_rate_limit_exhausted_returns_429_anthropic_body() {
         fallback: Default::default(),
         mcp_servers: Default::default(),
         tracing: drgtw_config::TracingConfig { enabled: false, ..Default::default() },
+        model_aliases: Default::default(),
+        otel: Default::default(),
     });
 
     // First request — should succeed (mock provides a response).

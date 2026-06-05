@@ -45,6 +45,7 @@ pub fn router(config: Arc<Config>, base_dir: &std::path::Path) -> Result<Router,
 pub async fn run(
     config: Config,
     base_dir: &std::path::Path,
+    otel_guard: Option<drgtw_otel::OtelGuard>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let addr: SocketAddr = config.server.bind_addr;
 
@@ -53,15 +54,42 @@ pub async fn run(
         connections = config.connections.len(),
         virtual_keys = config.virtual_keys.len(),
         ner = config.pii.ner.is_some(),
+        otel = otel_guard.is_some(),
         "starting gateway"
     );
 
-    let app = router(Arc::new(config), base_dir)?;
+    // Build proxy state, attaching OTel metric instruments (if any) before
+    // wrapping it for the router. Spans are exported via the global subscriber
+    // layer, so only metrics need to live in state.
+    let metrics = otel_guard.as_ref().and_then(|g| g.metrics.clone());
+    let state = Arc::new(ProxyState::new(Arc::new(config), base_dir)?.with_metrics(metrics));
+
+    // Hold a trace-writer handle so we can flush JSONL on graceful shutdown.
+    let trace_handle = state.trace_handle();
+
+    let proxy_routes = drgtw_proxy::router(state);
+    let health_route = Router::new().route("/health", get(routes::health::handle));
+    let app = Router::new()
+        .merge(proxy_routes)
+        .merge(health_route)
+        .layer(ServiceBuilder::new().layer(RequestIdLayer));
 
     let listener = TcpListener::bind(addr).await?;
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
+
+    // Shutdown order (per design §5.4): stop serving → flush drgtw-trace JSONL →
+    // flush OTel → exit.
+    if let Some(trace) = trace_handle {
+        trace.shutdown().await;
+    }
+    if let Some(guard) = otel_guard {
+        // The OTel batch processor / periodic reader run on their own threads
+        // and drive async exporters; flush on a blocking thread so the runtime
+        // reactor stays available to those export futures.
+        let _ = tokio::task::spawn_blocking(move || guard.shutdown()).await;
+    }
 
     info!("gateway stopped");
     Ok(())

@@ -60,12 +60,13 @@ use drgtw_pii::{
     EntityMap, StreamRestorer,
 };
 use drgtw_trace::{LlmMeta, TraceEntry, TraceKind};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use tracing::{info_span, Instrument as _};
 
 use crate::error::{ErrorFormat, ProxyError};
+use crate::otel_enrich;
 use crate::sse_restore::SseRestorer;
-use crate::upstream::{chat_completions_url, embeddings_url, messages_url};
+use crate::upstream::{bedrock_invoke_url, chat_completions_url, embeddings_url, messages_url};
 use crate::usage_tap::{usage_tap_stream, StreamUsage};
 use crate::ProxyState;
 
@@ -134,6 +135,93 @@ fn now_unix_ms() -> u64 {
 }
 
 // ---------------------------------------------------------------------------
+// Attribution metadata capture (Feature 2)
+// ---------------------------------------------------------------------------
+
+/// Header name prefix that flags a request header as attribution metadata.
+const META_HEADER_PREFIX: &str = "x-drgtw-meta-";
+/// Maximum number of metadata keys retained on an event.
+const META_MAX_KEYS: usize = 16;
+/// Maximum metadata key length (chars). Keys longer than this are dropped.
+const META_MAX_KEY_LEN: usize = 64;
+/// Maximum metadata value length (chars). Longer values are truncated.
+const META_MAX_VALUE_LEN: usize = 256;
+
+/// Truncate a string to at most `max` characters (char boundaries respected).
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_owned()
+    } else {
+        s.chars().take(max).collect()
+    }
+}
+
+/// Collect caller-supplied attribution metadata for the usage event.
+///
+/// Sources, merged with **headers winning on key collision**:
+///   1. The request body's top-level `metadata` object — string values are
+///      taken verbatim, non-string values are JSON-stringified. The body is
+///      NOT modified (we only read `parsed`).
+///   2. Request headers prefixed `x-drgtw-meta-` — the prefix is stripped and
+///      the remainder lowercased to form the key.
+///
+/// Caps (documented on [`UsageEvent::metadata`]): keys longer than
+/// [`META_MAX_KEY_LEN`] are dropped; values are truncated to
+/// [`META_MAX_VALUE_LEN`]; at most [`META_MAX_KEYS`] keys are kept, excess keys
+/// dropped deterministically in sorted (BTreeMap) order. Returns `None` when no
+/// metadata survives, so the event field stays absent for backward compat.
+///
+/// The `x-drgtw-meta-*` headers are never forwarded upstream: the upstream
+/// request is built from an explicit allowlist of headers, not the inbound set,
+/// so these never leak to the provider.
+fn collect_metadata(headers: &HeaderMap, parsed: &serde_json::Value) -> Option<BTreeMap<String, String>> {
+    let mut map: BTreeMap<String, String> = BTreeMap::new();
+
+    // 1. Body `metadata` object first (headers override below).
+    if let Some(obj) = parsed.get("metadata").and_then(|v| v.as_object()) {
+        for (k, v) in obj {
+            if k.is_empty() || k.chars().count() > META_MAX_KEY_LEN {
+                continue;
+            }
+            let value = match v {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Null => continue,
+                other => other.to_string(),
+            };
+            map.insert(k.clone(), truncate_chars(&value, META_MAX_VALUE_LEN));
+        }
+    }
+
+    // 2. `x-drgtw-meta-*` headers override on key collision.
+    for (name, value) in headers {
+        let name = name.as_str();
+        let Some(suffix) = name.strip_prefix(META_HEADER_PREFIX) else {
+            continue;
+        };
+        if suffix.is_empty() || suffix.chars().count() > META_MAX_KEY_LEN {
+            continue;
+        }
+        let Ok(val) = value.to_str() else { continue };
+        map.insert(suffix.to_ascii_lowercase(), truncate_chars(val, META_MAX_VALUE_LEN));
+    }
+
+    if map.is_empty() {
+        return None;
+    }
+
+    // Cap key count deterministically: BTreeMap iterates in sorted order, so
+    // keeping the first META_MAX_KEYS drops the lexicographically-largest keys.
+    if map.len() > META_MAX_KEYS {
+        let drop: Vec<String> = map.keys().skip(META_MAX_KEYS).cloned().collect();
+        for k in drop {
+            map.remove(&k);
+        }
+    }
+
+    Some(map)
+}
+
+// ---------------------------------------------------------------------------
 // Per-endpoint static configuration
 // ---------------------------------------------------------------------------
 
@@ -162,6 +250,21 @@ const ANTHROPIC_SPEC: EndpointSpec = EndpointSpec {
     error_fmt: ErrorFormat::Anthropic,
     name: "messages",
 };
+
+/// Does `spec` accept a candidate connection that speaks `conn_fmt`?
+///
+/// The `/v1/messages` endpoint (`ANTHROPIC_SPEC`) accepts BOTH `anthropic` and
+/// `bedrock` connections — a native-Bedrock connection serves the Anthropic
+/// Messages surface via InvokeModel. Every other endpoint requires an exact
+/// format match.
+fn spec_accepts_format(spec: &EndpointSpec, conn_fmt: ApiFormat) -> bool {
+    match spec.format {
+        ApiFormat::Anthropic => {
+            matches!(conn_fmt, ApiFormat::Anthropic | ApiFormat::Bedrock)
+        }
+        other => conn_fmt == other,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // POST /v1/chat/completions  (OpenAI format)
@@ -253,11 +356,26 @@ async fn proxy_endpoint(
     let mut parsed: serde_json::Value =
         serde_json::from_slice(&raw_body).unwrap_or(serde_json::Value::Null);
 
-    let model = parsed
+    // Capture attribution metadata from the ORIGINAL body + inbound headers
+    // before any rewrite. The body is not modified by this read.
+    let metadata = collect_metadata(&parts.headers, &parsed);
+
+    // Extract the caller-supplied model, then resolve it through the global
+    // `[model_aliases]` table (one level only) and rewrite the body `model`
+    // field so ALL downstream logic — routing, allowlist, cost lookup, usage
+    // events — sees the resolved model.
+    let requested_model = parsed
         .get("model")
         .and_then(|v| v.as_str())
         .ok_or(ProxyError::MissingModel)?
         .to_owned();
+    let model = state.config.resolve_model_alias(&requested_model).to_owned();
+    let model_rewritten = model != requested_model;
+    if model_rewritten
+        && let Some(obj) = parsed.as_object_mut()
+    {
+        obj.insert("model".to_owned(), serde_json::Value::String(model.clone()));
+    }
 
     let streaming = parsed.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
 
@@ -268,7 +386,7 @@ async fn proxy_endpoint(
     let matching: Vec<&Connection> = all_candidates
         .iter()
         .copied()
-        .filter(|c| c.format == spec.format)
+        .filter(|c| spec_accepts_format(spec, c.format))
         .collect();
     if matching.is_empty() {
         let first_fmt = all_candidates[0].format;
@@ -282,6 +400,31 @@ async fn proxy_endpoint(
         vec![matching[0]]
     };
 
+    // 7b. Native Bedrock streaming guard (0.0.2 limitation). `bedrock`
+    //     connections cannot serve `stream:true` (native streaming uses
+    //     `invoke-with-response-stream` eventstream framing, deferred), so for
+    //     streaming requests they are removed from the candidate list — the
+    //     fallback loop must never dispatch a stream to one, not even as a
+    //     later candidate. If no candidate remains, reject with a clean 400
+    //     BEFORE any upstream call (error in the endpoint's wire format).
+    let candidates: Vec<&Connection> = if streaming {
+        let non_bedrock: Vec<&Connection> = candidates
+            .iter()
+            .copied()
+            .filter(|c| c.format != ApiFormat::Bedrock)
+            .collect();
+        if non_bedrock.is_empty() {
+            return Err(ProxyError::FormatMismatch(
+                "native Bedrock streaming is not supported in this release; \
+                 retry without `stream: true`"
+                    .to_owned(),
+            ));
+        }
+        non_bedrock
+    } else {
+        candidates
+    };
+
     // 8. Anthropic only: determine the anthropic-version header to forward.
     let anthropic_version = parts
         .headers
@@ -289,6 +432,25 @@ async fn proxy_endpoint(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("2023-06-01")
         .to_owned();
+
+    // 8b. Native Bedrock body transform (the ONE place the messages path is not
+    //     a pure passthrough). For a `bedrock` connection, InvokeModel takes the
+    //     model id in the URL path, not the body, and requires the
+    //     `anthropic_version` Bedrock marker. We therefore, on the parsed value:
+    //       * remove the top-level `model` field (it moves into the URL), and
+    //       * insert `"anthropic_version": "bedrock-2023-05-31"` if the client
+    //         did not already supply one (client value is preserved).
+    //     Done before pseudonymisation so the rewritten value flows through the
+    //     existing serialise-once path. `model_for_transform` forces a
+    //     re-serialise even on the PII-off path.
+    let bedrock_transform = candidates[0].format == ApiFormat::Bedrock;
+    if bedrock_transform
+        && let Some(obj) = parsed.as_object_mut()
+    {
+        obj.remove("model");
+        obj.entry("anthropic_version".to_owned())
+            .or_insert_with(|| serde_json::Value::String("bedrock-2023-05-31".to_owned()));
+    }
 
     // 9. PII request rewrite (WP 3.4 / 4.4). The pseudonymised bytes are reused
     //    as-is across every fallback attempt (same map — required for restore).
@@ -313,7 +475,15 @@ async fn proxy_endpoint(
         .map_err(|e| pii_unavailable(spec, e.to_string()))?;
         let rewritten = rewritten.unwrap_or_else(|| raw_for_fallback.to_vec());
         (Bytes::from(rewritten), Arc::new(map))
+    } else if model_rewritten || bedrock_transform {
+        // PII off but the body was rewritten (alias resolution and/or the
+        // Bedrock model-strip + anthropic_version injection): re-serialize so
+        // the upstream sees the rewritten body. Falls back to the original
+        // bytes if serialization somehow fails.
+        let rewritten = serde_json::to_vec(&parsed).unwrap_or_else(|_| raw_body.to_vec());
+        (Bytes::from(rewritten), Arc::new(EntityMap::new()))
     } else {
+        // PII off, no rewrite → byte-identical passthrough.
         (raw_body, Arc::new(EntityMap::new()))
     };
 
@@ -346,9 +516,13 @@ async fn proxy_endpoint(
         for (i, connection) in candidates.iter().copied().enumerate() {
             let is_last = i == last_idx;
 
-            let url = match spec.format {
+            // URL + auth branch on the CONNECTION's format (not the endpoint
+            // spec): a `bedrock` connection serves the `/v1/messages` surface
+            // but dispatches to native InvokeModel with bearer auth.
+            let url = match connection.format {
                 ApiFormat::OpenAi => chat_completions_url(&connection.base_url),
                 ApiFormat::Anthropic => messages_url(&connection.base_url),
+                ApiFormat::Bedrock => bedrock_invoke_url(&connection.base_url, &model),
             };
 
             let mut builder = state
@@ -356,8 +530,8 @@ async fn proxy_endpoint(
                 .post(&url)
                 .header("Content-Type", "application/json")
                 .body(upstream_body.clone());
-            builder = match spec.format {
-                ApiFormat::OpenAi => {
+            builder = match connection.format {
+                ApiFormat::OpenAi | ApiFormat::Bedrock => {
                     builder.header("Authorization", format!("Bearer {}", connection.api_key))
                 }
                 ApiFormat::Anthropic => builder
@@ -416,6 +590,9 @@ async fn proxy_endpoint(
             fallback_attempts,
             debug,
             upstream_body: upstream_body.clone(),
+            metadata: metadata.clone(),
+            base_url: connection.base_url.clone(),
+            pii_entities: pii_map.len() as u64,
         };
 
         let mut resp = relay_with_usage(
@@ -465,6 +642,15 @@ struct RelayCtx {
     /// The exact bytes sent upstream (post-pseudonymization). Used to populate
     /// `drgtw_debug.pseudonymized_request` when `debug` is set.
     upstream_body: Bytes,
+    /// Caller-supplied attribution metadata (Feature 2). `None` when absent.
+    metadata: Option<BTreeMap<String, String>>,
+    /// Upstream base URL of the serving connection. Used only to derive
+    /// `server.address`/`server.port` span attributes (host + port, never
+    /// path/query).
+    base_url: String,
+    /// Number of PII entities pseudonymized this request (count only — the
+    /// entities themselves never reach telemetry).
+    pii_entities: u64,
 }
 
 /// Relay an upstream response as an axum response, restoring PII on 2xx JSON
@@ -494,7 +680,7 @@ async fn relay_with_usage(
     if !upstream_status.is_success() {
         let resp_bytes: Bytes = upstream_resp.bytes().await.map_err(ProxyError::Upstream)?;
         let status = upstream_status.as_u16();
-        emit_event(&ctx, status, None, None, None, false);
+        emit_event(&ctx, status, None, None, None, None, false);
         emit_trace_from_ctx(
             &ctx,
             status,
@@ -526,6 +712,12 @@ async fn relay_with_usage(
         // Emitted BEFORE the completion closure consumes `ctx`.
         emit_trace_from_ctx(&ctx, status_u16, None, None, None);
 
+        // OTel span enrichment at handoff: the request span closes when the
+        // response is handed back, so allow-listed attrs (status; tokens not yet
+        // known) go on now. Token/cost metrics are recorded at stream completion
+        // by `emit_event`.
+        otel_enrich::enrich_span(&otel_telemetry(&ctx, status_u16, None, None, None, None, true));
+
         // Move the pieces needed at completion into the callback. Cost is only
         // computed when both token counts are present (e.g. OpenAI without
         // include_usage yields None tokens → None cost → no budget record).
@@ -538,7 +730,8 @@ async fn relay_with_usage(
             if let Some(c) = cost {
                 ctx.state.budget.record(&ctx.key_id, c);
             }
-            emit_event(&ctx, status_u16, input, output, cost, true);
+            let ttft_s = usage.first_chunk_at.map(|t| t.duration_since(ctx.started).as_secs_f64());
+            emit_event(&ctx, status_u16, input, output, cost, ttft_s, true);
         };
 
         let body = Body::from_stream(usage_tap_stream(raw_stream, restorer, format, on_complete));
@@ -563,7 +756,10 @@ async fn relay_with_usage(
         .as_ref()
         .and_then(|v| match ctx.spec.format {
             ApiFormat::OpenAi => extract_usage_openai(v),
-            ApiFormat::Anthropic => extract_usage_anthropic(v),
+            // The messages endpoint serves both `anthropic` and `bedrock`
+            // connections; native Bedrock InvokeModel returns the Anthropic
+            // Messages JSON, so the same extractor reads input/output tokens.
+            ApiFormat::Anthropic | ApiFormat::Bedrock => extract_usage_anthropic(v),
         })
         .map(|(i, o)| (Some(i), Some(o)))
         .unwrap_or((None, None));
@@ -575,7 +771,7 @@ async fn relay_with_usage(
     if let Some(c) = cost {
         ctx.state.budget.record(&ctx.key_id, c);
     }
-    emit_event(&ctx, upstream_status.as_u16(), input, output, cost, false);
+    emit_event(&ctx, upstream_status.as_u16(), input, output, cost, None, false);
     emit_trace_from_ctx(&ctx, upstream_status.as_u16(), input, output, None);
 
     // Demo debug block (`x-drgtw-debug: on`): only meaningful when PII is on for
@@ -627,16 +823,59 @@ async fn relay_with_usage(
 // Event emission
 // ---------------------------------------------------------------------------
 
+/// Build the allow-listed [`drgtw_otel::RequestTelemetry`] for this request.
+fn otel_telemetry(
+    ctx: &RelayCtx,
+    status: u16,
+    input: Option<u64>,
+    output: Option<u64>,
+    cost: Option<f64>,
+    ttft_s: Option<f64>,
+    streamed: bool,
+) -> drgtw_otel::RequestTelemetry {
+    otel_enrich::telemetry(
+        ctx.spec.name,
+        ctx.spec.format,
+        &ctx.model,
+        &ctx.conn_name,
+        &ctx.base_url,
+        &ctx.key_id,
+        &ctx.request_id,
+        Some(status),
+        otel_enrich::error_class_for_status(status),
+        input,
+        output,
+        cost,
+        Some(ctx.started.elapsed().as_secs_f64()),
+        ttft_s,
+        ctx.pii_flag,
+        streamed,
+        ctx.fallback_attempts,
+    )
+}
+
 /// Emit a usage event when a sink is configured. `cost` is precomputed by the
 /// caller (which has already recorded it against the budget).
+///
+/// Also the OTel chokepoint: records metrics (when `[otel] metrics` is on) and
+/// enriches the current request span — except on the streaming completion path
+/// (`streamed`), which runs after the request span has closed; there the span
+/// was already enriched at handoff and only metrics are recorded here.
 fn emit_event(
     ctx: &RelayCtx,
     status: u16,
     input: Option<u64>,
     output: Option<u64>,
     cost: Option<f64>,
+    ttft_s: Option<f64>,
     streamed: bool,
 ) {
+    let telemetry = otel_telemetry(ctx, status, input, output, cost, ttft_s, streamed);
+    if !streamed {
+        otel_enrich::enrich_span(&telemetry);
+    }
+    otel_enrich::record_metrics(&ctx.state, &telemetry, ctx.pii_entities);
+
     let Some(sink) = &ctx.state.events else { return };
     sink.emit(UsageEvent {
         request_id: ctx.request_id.clone(),
@@ -653,6 +892,7 @@ fn emit_event(
         streamed,
         fallback_attempts: ctx.fallback_attempts,
         ts_unix_ms: now_unix_ms(),
+        metadata: ctx.metadata.clone(),
     });
 }
 
@@ -858,9 +1098,12 @@ fn extract_response_text(format: BodyFormat, response: &serde_json::Value) -> Ve
 
 fn format_mismatch_error(spec: &EndpointSpec, actual: ApiFormat, model: &str) -> ProxyError {
     let fmt_name = format_name(actual);
+    // `spec` is only ever OPENAI_SPEC or ANTHROPIC_SPEC; Bedrock connections are
+    // served via ANTHROPIC_SPEC, so treat any non-OpenAI spec as the messages
+    // surface and point a mismatch back at /v1/chat/completions.
     let other_endpoint = match spec.format {
         ApiFormat::OpenAi => "/v1/messages",
-        ApiFormat::Anthropic => "/v1/chat/completions",
+        ApiFormat::Anthropic | ApiFormat::Bedrock => "/v1/chat/completions",
     };
     ProxyError::FormatMismatch(format!(
         "model `{model}` is served by a connection with format `{fmt_name}`; use {other_endpoint}"
@@ -870,7 +1113,8 @@ fn format_mismatch_error(spec: &EndpointSpec, actual: ApiFormat, model: &str) ->
 fn pii_unavailable(spec: &EndpointSpec, detail: String) -> ProxyError {
     match spec.format {
         ApiFormat::OpenAi => ProxyError::PiiUnavailable(detail),
-        ApiFormat::Anthropic => ProxyError::PiiUnavailableAnthropic(detail),
+        // Anthropic and Bedrock both serve the messages endpoint → anthropic body.
+        ApiFormat::Anthropic | ApiFormat::Bedrock => ProxyError::PiiUnavailableAnthropic(detail),
     }
 }
 
@@ -898,6 +1142,7 @@ fn format_name(fmt: ApiFormat) -> &'static str {
     match fmt {
         ApiFormat::OpenAi => "open_ai",
         ApiFormat::Anthropic => "anthropic",
+        ApiFormat::Bedrock => "bedrock",
     }
 }
 
@@ -1028,11 +1273,24 @@ async fn embeddings_inner(
     // 6. Parse for routing + optional PII rewrite. `model` is required.
     let mut parsed: serde_json::Value =
         serde_json::from_slice(&raw_body).unwrap_or(serde_json::Value::Null);
-    let model = parsed
+
+    // Capture attribution metadata from the original body + inbound headers.
+    let metadata = collect_metadata(&parts.headers, &parsed);
+
+    // Resolve the model through the global alias table (one level) and rewrite
+    // the body so routing, allowlist, cost, and usage all see the resolved name.
+    let requested_model = parsed
         .get("model")
         .and_then(|v| v.as_str())
         .ok_or(ProxyError::MissingModel)?
         .to_owned();
+    let model = state.config.resolve_model_alias(&requested_model).to_owned();
+    let model_rewritten = model != requested_model;
+    if model_rewritten
+        && let Some(obj) = parsed.as_object_mut()
+    {
+        obj.insert("model".to_owned(), serde_json::Value::String(model.clone()));
+    }
 
     // 7. Resolve candidates, filter to open_ai connections.
     let all_candidates = resolved.connections_for_model(&model).map_err(ProxyError::from)?;
@@ -1075,8 +1333,13 @@ async fn embeddings_inner(
         .map_err(|e| ProxyError::PiiUnavailable(e.to_string()))?;
         let rewritten = rewritten.unwrap_or_else(|| raw_for_fallback.to_vec());
         (Bytes::from(rewritten), used)
+    } else if model_rewritten {
+        // PII off but the model alias was resolved: re-serialize so the
+        // upstream sees the resolved model.
+        let rewritten = serde_json::to_vec(&parsed).unwrap_or_else(|_| raw_body.to_vec());
+        (Bytes::from(rewritten), false)
     } else {
-        // PII off → byte-identical passthrough.
+        // PII off, no alias rewrite → byte-identical passthrough.
         (raw_body, false)
     };
 
@@ -1186,6 +1449,31 @@ async fn embeddings_inner(
             trace_error,
         );
 
+        // OTel: enrich the request span + record metrics (embeddings emit
+        // in-span; never streaming). Entity counts are not tracked on this
+        // path — the pii flag alone is carried.
+        let telemetry = otel_enrich::telemetry(
+            "embeddings",
+            connection.format,
+            &model,
+            &conn_name,
+            &connection.base_url,
+            &key_id,
+            &request_id,
+            Some(status_u16),
+            otel_enrich::error_class_for_status(status_u16),
+            input_tokens,
+            None,
+            cost,
+            Some(started.elapsed().as_secs_f64()),
+            None,
+            pii_used,
+            false,
+            fallback_attempts,
+        );
+        otel_enrich::enrich_span(&telemetry);
+        otel_enrich::record_metrics(&state, &telemetry, 0);
+
         if let Some(sink) = &state.events {
             sink.emit(UsageEvent {
                 request_id: request_id.clone(),
@@ -1202,6 +1490,7 @@ async fn embeddings_inner(
                 streamed: false,
                 fallback_attempts,
                 ts_unix_ms: now_unix_ms(),
+                metadata: metadata.clone(),
             });
         }
 

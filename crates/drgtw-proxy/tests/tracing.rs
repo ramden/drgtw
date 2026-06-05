@@ -70,6 +70,8 @@ fn chat_config(mock_base_url: &str, tracing: TracingConfig) -> Arc<Config> {
         fallback: Default::default(),
         mcp_servers: Default::default(),
         tracing,
+        model_aliases: Default::default(),
+        otel: Default::default(),
     })
 }
 
@@ -104,6 +106,8 @@ fn mcp_config(upstream_url: &str, dir: &std::path::Path) -> Arc<Config> {
         fallback: Default::default(),
         mcp_servers: servers,
         tracing: tracing_config(dir, true),
+        model_aliases: Default::default(),
+        otel: Default::default(),
     })
 }
 

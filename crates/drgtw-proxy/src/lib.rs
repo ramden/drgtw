@@ -16,6 +16,7 @@ use drgtw_pii::{EntityStore, PiiEngine};
 mod error;
 mod handlers;
 mod mcp;
+pub mod otel_enrich;
 mod sse_restore;
 mod state;
 mod upstream;
@@ -51,6 +52,11 @@ pub struct ProxyState {
     /// is resolved against the config base dir at build time. `None` disables
     /// tracing entirely — every emit site is a cheap `Option` check.
     pub trace: Option<drgtw_trace::TraceWriter>,
+    /// OpenTelemetry metric instruments (0.0.2). `Some` only when `[otel]` is
+    /// enabled with `metrics = true`; recording is gated on this `Option` so the
+    /// disabled path is a cheap branch. Spans flow through the global tracing
+    /// subscriber layer, so they need no state here.
+    pub metrics: Option<Arc<drgtw_otel::Metrics>>,
 }
 
 impl std::fmt::Debug for ProxyState {
@@ -75,6 +81,17 @@ impl ProxyState {
         base_dir: &std::path::Path,
     ) -> Result<Self, drgtw_pii::EngineBuildError> {
         Self::build(config, base_dir)
+    }
+
+    /// Attach OpenTelemetry metric instruments, consuming and returning `self`.
+    ///
+    /// Builder-style so the binary can wire metrics after constructing state
+    /// without changing [`ProxyState::new`]'s signature (tests and the
+    /// `--validate-config` path build state without metrics).
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: Option<Arc<drgtw_otel::Metrics>>) -> Self {
+        self.metrics = metrics;
+        self
     }
 
     /// Clone the trace-writer handle, if tracing is enabled.

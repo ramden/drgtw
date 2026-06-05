@@ -42,6 +42,9 @@ use crate::sse_restore::SseRestorer;
 pub struct StreamUsage {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
+    /// When the first upstream chunk arrived. The caller derives
+    /// time-to-first-chunk against its own request start instant.
+    pub first_chunk_at: Option<std::time::Instant>,
 }
 
 /// Accumulator that reads usage from each SSE event's JSON payload.
@@ -66,6 +69,9 @@ impl UsageAccumulator {
     fn push(&mut self, chunk: &[u8]) {
         if self.done {
             return;
+        }
+        if self.usage.first_chunk_at.is_none() {
+            self.usage.first_chunk_at = Some(std::time::Instant::now());
         }
         self.buf.extend_from_slice(chunk);
         while let Some(end) = find_event_boundary(&self.buf) {

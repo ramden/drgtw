@@ -31,6 +31,12 @@ pub struct Config {
     /// Fallback routing behaviour (WP 8.1).
     #[serde(default)]
     pub fallback: FallbackConfig,
+    /// Global model aliases: alias name → target model name. TOML shape
+    /// `[model_aliases]` with `alias = "target"` entries. Resolution is
+    /// ONE LEVEL only — if a target is itself an alias key, it is NOT
+    /// re-resolved (no recursive chains). Defaults to empty (no aliases).
+    #[serde(default)]
+    pub model_aliases: HashMap<String, String>,
     /// Aggregated upstream MCP servers, keyed by name (WP-A). TOML shape
     /// `[mcp_servers.<name>]`. Defaults to empty (no MCP servers configured).
     #[serde(default)]
@@ -38,6 +44,10 @@ pub struct Config {
     /// Filesystem request tracing. On by default; logrotate-style.
     #[serde(default)]
     pub tracing: TracingConfig,
+    /// OpenTelemetry OTLP export (traces + metrics). Off by default; additive
+    /// to `[tracing]` (filesystem JSONL) which is unrelated and untouched.
+    #[serde(default)]
+    pub otel: OtelConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -107,6 +117,11 @@ pub struct Connection {
 pub enum ApiFormat {
     OpenAi,
     Anthropic,
+    /// Native AWS Bedrock `InvokeModel` (non-streaming), Anthropic-shaped body,
+    /// bearer auth. The URL builder appends `/model/{model}/invoke`, so the
+    /// `base_url` carries NO `/v1` suffix
+    /// (e.g. `https://bedrock-runtime.eu-central-1.amazonaws.com`).
+    Bedrock,
 }
 
 /// Per-virtual-key spend budget (WP 8.1).
@@ -350,6 +365,90 @@ fn default_tracing_archive_after_files() -> u64 {
     10
 }
 
+/// OTLP transport protocol.
+#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OtelProtocol {
+    /// gRPC (OTLP/gRPC), conventional port 4317. Default.
+    #[default]
+    Grpc,
+    /// HTTP/protobuf (OTLP/HTTP), conventional port 4318.
+    Http,
+}
+
+/// OpenTelemetry OTLP export configuration.
+///
+/// **Default = disabled.** When `enabled` is `false` no provider is installed,
+/// no exporter is created, and the gateway's `[tracing]` JSONL writer plus the
+/// stderr `fmt` subscriber behave byte-identically to before.
+///
+/// Privacy: spans and metrics carry ONLY the allow-listed metadata (model,
+/// connection, status, token counts, cost, latency, ttft, key_id, pii_flag,
+/// request_id, endpoint, error class, fallback attempts). Prompt/response
+/// content, PII values, pseudonyms, and secrets are NEVER exported — there is
+/// no config switch to enable content capture.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct OtelConfig {
+    /// Master switch. Default `false`. Everything below is inert until `true`.
+    pub enabled: bool,
+    /// OTLP endpoint URL. gRPC conventionally `:4317`, HTTP `:4318`.
+    /// `OTEL_EXPORTER_OTLP_ENDPOINT` env var, if set, overrides this at init.
+    pub endpoint: String,
+    /// Transport protocol: `grpc` (default) or `http`.
+    pub protocol: OtelProtocol,
+    /// `service.name` resource attribute. Default `"drgtw"`.
+    pub service_name: String,
+    /// Export spans. Default `true` (only takes effect when `enabled`).
+    pub traces: bool,
+    /// Export metrics. Default `true` (only takes effect when `enabled`).
+    pub metrics: bool,
+    /// Parent-based trace ratio sampler ratio, `0.0..=1.0`. Default `1.0`.
+    pub sample_ratio: f64,
+    /// Periodic metric reader push interval in milliseconds. Default `10000`.
+    pub export_interval_ms: u64,
+    /// Per-export deadline in milliseconds (traces batch + metrics). Default `5000`.
+    pub export_timeout_ms: u64,
+    /// Include `drgtw.key_id` as a **metric** label. Default `false` — key_id
+    /// multiplies metric cardinality (keys × models × connections × status).
+    /// Spans always carry key_id (spans are not aggregated); this flag controls
+    /// metrics only.
+    pub metrics_include_key_id: bool,
+}
+
+impl Default for OtelConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: default_otel_endpoint(),
+            protocol: OtelProtocol::default(),
+            service_name: default_otel_service_name(),
+            traces: true,
+            metrics: true,
+            sample_ratio: default_otel_sample_ratio(),
+            export_interval_ms: default_otel_export_interval_ms(),
+            export_timeout_ms: default_otel_export_timeout_ms(),
+            metrics_include_key_id: false,
+        }
+    }
+}
+
+fn default_otel_endpoint() -> String {
+    "http://localhost:4317".to_string()
+}
+fn default_otel_service_name() -> String {
+    "drgtw".to_string()
+}
+fn default_otel_sample_ratio() -> f64 {
+    1.0
+}
+fn default_otel_export_interval_ms() -> u64 {
+    10_000
+}
+fn default_otel_export_timeout_ms() -> u64 {
+    5_000
+}
+
 /// Upstream authentication scheme for an MCP server (WP-A).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -416,6 +515,21 @@ pub enum ConfigError {
     MissingEnvVar { var: String, field: String },
     #[error("invalid config: {0}")]
     Invalid(String),
+}
+
+impl Config {
+    /// Resolve a model name through the global `[model_aliases]` table.
+    ///
+    /// Resolution is **one level only**: if `name` is an alias, its target is
+    /// returned even when that target is itself an alias key (no recursive
+    /// chains are followed). When `name` is not an alias it is returned
+    /// unchanged.
+    pub fn resolve_model_alias<'a>(&'a self, name: &'a str) -> &'a str {
+        self.model_aliases
+            .get(name)
+            .map(String::as_str)
+            .unwrap_or(name)
+    }
 }
 
 /// Load, env-resolve, and validate a config file.
@@ -852,6 +966,36 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
         }
     }
 
+    // --- OTel ---
+    // Only validate when enabled: a disabled section may carry placeholder
+    // defaults and must never fail boot.
+    if config.otel.enabled {
+        if config.otel.endpoint.is_empty() {
+            return Err(ConfigError::Invalid(
+                "otel.endpoint must not be empty when otel.enabled is true".to_owned(),
+            ));
+        }
+        // Endpoint must be a valid absolute http(s) URL. (No query/fragment —
+        // OTLP endpoints are bare host:port roots.)
+        validate_absolute_http_url(&config.otel.endpoint, "otel.endpoint")?;
+        if !(0.0..=1.0).contains(&config.otel.sample_ratio) {
+            return Err(ConfigError::Invalid(format!(
+                "otel.sample_ratio must be in 0.0..=1.0, got {}",
+                config.otel.sample_ratio
+            )));
+        }
+        if config.otel.export_interval_ms == 0 {
+            return Err(ConfigError::Invalid(
+                "otel.export_interval_ms must be > 0".to_owned(),
+            ));
+        }
+        if config.otel.export_timeout_ms == 0 {
+            return Err(ConfigError::Invalid(
+                "otel.export_timeout_ms must be > 0".to_owned(),
+            ));
+        }
+    }
+
     Ok(())
 }
 
@@ -1001,6 +1145,98 @@ enabled_by_default = true
             cfg.pii.enabled_by_default,
             "pii on by default — privacy-first"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Model aliases (Feature 1)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_model_aliases_absent_defaults_empty() {
+        let cfg = load_toml("").expect("minimal config");
+        assert!(
+            cfg.model_aliases.is_empty(),
+            "model_aliases defaults to empty when the table is absent"
+        );
+        // An unknown name resolves to itself.
+        assert_eq!(cfg.resolve_model_alias("gpt-4o"), "gpt-4o");
+    }
+
+    #[test]
+    fn test_model_aliases_parsed() {
+        let toml = r#"
+[model_aliases]
+fast = "gpt-4o-mini"
+smart = "gpt-4o"
+"#;
+        let cfg = load_toml(toml).expect("should load");
+        assert_eq!(cfg.model_aliases.len(), 2);
+        assert_eq!(cfg.resolve_model_alias("fast"), "gpt-4o-mini");
+        assert_eq!(cfg.resolve_model_alias("smart"), "gpt-4o");
+        // Non-alias name passes through unchanged.
+        assert_eq!(cfg.resolve_model_alias("gpt-4o"), "gpt-4o");
+    }
+
+    #[test]
+    fn test_model_aliases_one_level_only() {
+        // `a` points at `b`, and `b` is itself an alias. Resolution is one
+        // level: `a` resolves to `b` (NOT to `c`).
+        let toml = r#"
+[model_aliases]
+a = "b"
+b = "c"
+"#;
+        let cfg = load_toml(toml).expect("should load");
+        assert_eq!(
+            cfg.resolve_model_alias("a"),
+            "b",
+            "one-level resolution: alias chains are NOT followed"
+        );
+        assert_eq!(cfg.resolve_model_alias("b"), "c");
+    }
+
+    // -----------------------------------------------------------------------
+    // Bedrock native format (0.0.2, Option A2)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_bedrock_format_deserializes() {
+        // `format = "bedrock"` round-trips to ApiFormat::Bedrock. base_url has
+        // NO /v1 suffix — the URL builder appends /model/{model}/invoke.
+        let toml = r#"
+[[connections]]
+name = "bedrock-native-eu"
+base_url = "https://bedrock-runtime.eu-central-1.amazonaws.com"
+api_key = "bedrock-bearer-token"
+format = "bedrock"
+models = ["eu.anthropic.claude-sonnet-4-6"]
+"#;
+        let cfg = load_toml(toml).expect("bedrock format should load");
+        assert_eq!(cfg.connections[0].format, ApiFormat::Bedrock);
+        assert_eq!(
+            cfg.connections[0].base_url,
+            "https://bedrock-runtime.eu-central-1.amazonaws.com"
+        );
+    }
+
+    #[test]
+    fn test_bedrock_invalid_base_url_rejected() {
+        // The same absolute-http(s) URL validation applies to bedrock
+        // connections; a non-URL base_url is rejected with ConfigError::Invalid.
+        let toml = r#"
+[[connections]]
+name = "bedrock-bad"
+base_url = "not a url at all"
+api_key = "bedrock-bearer-token"
+format = "bedrock"
+"#;
+        let err = load_toml(toml).expect_err("bad bedrock base_url");
+        match err {
+            ConfigError::Invalid(msg) => {
+                assert!(msg.contains("connections[bedrock-bad].base_url"), "{msg}")
+            }
+            other => panic!("unexpected: {other}"),
+        }
     }
 
     #[test]
@@ -2728,5 +2964,145 @@ retention_days = 7
         assert_eq!(cfg.tracing.dir, "traces");
         assert_eq!(cfg.tracing.rotate_max_bytes, 52_428_800);
         assert_eq!(cfg.tracing.archive_after_files, 10);
+    }
+
+    // -----------------------------------------------------------------------
+    // OTel config (0.0.2)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_otel_defaults_when_absent() {
+        let cfg = load_toml("").expect("empty config");
+        assert!(!cfg.otel.enabled, "otel.enabled must default to false");
+        assert_eq!(cfg.otel.endpoint, "http://localhost:4317");
+        assert_eq!(cfg.otel.protocol, OtelProtocol::Grpc);
+        assert_eq!(cfg.otel.service_name, "drgtw");
+        assert!(cfg.otel.traces);
+        assert!(cfg.otel.metrics);
+        assert_eq!(cfg.otel.sample_ratio, 1.0);
+        assert_eq!(cfg.otel.export_interval_ms, 10_000);
+        assert_eq!(cfg.otel.export_timeout_ms, 5_000);
+        assert!(
+            !cfg.otel.metrics_include_key_id,
+            "key_id must be off metrics by default (cardinality)"
+        );
+    }
+
+    #[test]
+    fn test_otel_full_section_parses() {
+        let toml = r#"
+[otel]
+enabled = true
+endpoint = "http://otel-collector.example.com:4317"
+protocol = "grpc"
+service_name = "example-gateway"
+traces = true
+metrics = false
+sample_ratio = 0.25
+export_interval_ms = 2000
+export_timeout_ms = 1000
+metrics_include_key_id = true
+"#;
+        let cfg = load_toml(toml).expect("full otel section parses");
+        assert!(cfg.otel.enabled);
+        assert_eq!(cfg.otel.endpoint, "http://otel-collector.example.com:4317");
+        assert_eq!(cfg.otel.protocol, OtelProtocol::Grpc);
+        assert_eq!(cfg.otel.service_name, "example-gateway");
+        assert!(cfg.otel.traces);
+        assert!(!cfg.otel.metrics);
+        assert_eq!(cfg.otel.sample_ratio, 0.25);
+        assert_eq!(cfg.otel.export_interval_ms, 2000);
+        assert_eq!(cfg.otel.export_timeout_ms, 1000);
+        assert!(cfg.otel.metrics_include_key_id);
+    }
+
+    #[test]
+    fn test_otel_protocol_http_round_trips() {
+        let toml = r#"
+[otel]
+protocol = "http"
+"#;
+        let cfg = load_toml(toml).expect("http protocol parses");
+        assert_eq!(cfg.otel.protocol, OtelProtocol::Http);
+    }
+
+    #[test]
+    fn test_otel_disabled_invalid_endpoint_ok() {
+        // A disabled section must never fail boot, even with a bogus endpoint.
+        let toml = r#"
+[otel]
+enabled = false
+endpoint = "not a url"
+sample_ratio = 9.0
+"#;
+        let cfg = load_toml(toml).expect("disabled otel never validated");
+        assert!(!cfg.otel.enabled);
+    }
+
+    #[test]
+    fn test_otel_enabled_sample_ratio_too_high_rejected() {
+        let toml = r#"
+[otel]
+enabled = true
+endpoint = "http://otel-collector.example.com:4317"
+sample_ratio = 1.5
+"#;
+        let err = load_toml(toml).expect_err("sample_ratio > 1.0 rejected");
+        match err {
+            ConfigError::Invalid(msg) => assert!(msg.contains("sample_ratio"), "{msg}"),
+            other => panic!("unexpected: {other}"),
+        }
+    }
+
+    #[test]
+    fn test_otel_enabled_sample_ratio_negative_rejected() {
+        let toml = r#"
+[otel]
+enabled = true
+endpoint = "http://otel-collector.example.com:4317"
+sample_ratio = -0.1
+"#;
+        let err = load_toml(toml).expect_err("negative sample_ratio rejected");
+        assert!(matches!(err, ConfigError::Invalid(_)));
+    }
+
+    #[test]
+    fn test_otel_enabled_empty_endpoint_rejected() {
+        let toml = r#"
+[otel]
+enabled = true
+endpoint = ""
+"#;
+        let err = load_toml(toml).expect_err("empty endpoint rejected when enabled");
+        match err {
+            ConfigError::Invalid(msg) => assert!(msg.contains("endpoint"), "{msg}"),
+            other => panic!("unexpected: {other}"),
+        }
+    }
+
+    #[test]
+    fn test_otel_enabled_invalid_endpoint_rejected() {
+        let toml = r#"
+[otel]
+enabled = true
+endpoint = "ftp://nope"
+"#;
+        let err = load_toml(toml).expect_err("non-http endpoint rejected when enabled");
+        match err {
+            ConfigError::Invalid(msg) => assert!(msg.contains("otel.endpoint"), "{msg}"),
+            other => panic!("unexpected: {other}"),
+        }
+    }
+
+    #[test]
+    fn test_otel_enabled_zero_interval_rejected() {
+        let toml = r#"
+[otel]
+enabled = true
+endpoint = "http://otel-collector.example.com:4317"
+export_interval_ms = 0
+"#;
+        let err = load_toml(toml).expect_err("zero interval rejected");
+        assert!(matches!(err, ConfigError::Invalid(_)));
     }
 }

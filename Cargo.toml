@@ -10,12 +10,13 @@ members = [
     "crates/drgtw-trace",
     "crates/drgtw-mcp",
     "crates/drgtw-vault",
+    "crates/drgtw-otel",
     "bins/drgtw",
     "bins/drgtw-bench",
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.0.2"
 edition = "2024"
 license = "Apache-2.0"
 
@@ -29,6 +30,7 @@ drgtw-events = { path = "crates/drgtw-events" }
 drgtw-trace = { path = "crates/drgtw-trace" }
 drgtw-mcp = { path = "crates/drgtw-mcp" }
 drgtw-vault = { path = "crates/drgtw-vault" }
+drgtw-otel = { path = "crates/drgtw-otel" }
 
 axum = "0.8"
 bytes = "1"
@@ -60,3 +62,14 @@ aes-gcm = "0.10"
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
+anyhow = "1"
+
+# OpenTelemetry (0.0.2). Always compiled, runtime-gated via `[otel] enabled`.
+# Transport features: gRPC (grpc-tonic) + HTTP/protobuf (http-proto +
+# reqwest-client). NEVER reqwest-blocking-client (stalls a tokio worker).
+opentelemetry = { version = "0.32", default-features = false, features = ["trace", "metrics"] }
+opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace", "metrics", "rt-tokio", "testing"] }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["grpc-tonic", "http-proto", "reqwest-client", "trace", "metrics", "tls-webpki-roots"] }
+opentelemetry-semantic-conventions = { version = "0.32", features = ["semconv_experimental"] }
+opentelemetry-proto = { version = "0.32", default-features = false, features = ["gen-tonic-messages", "trace", "metrics"] }
+tracing-opentelemetry = { version = "0.33", default-features = false, features = ["metrics"] }

@@ -78,6 +78,36 @@ models = [
 # models   = ["gpt-4o", "gpt-4o-mini"]
 
 # ---------------------------------------------------------------------------
+# AWS Bedrock — bearer auth (Bedrock API key), no SigV4. The region is in the
+# hostname.  Two ways to connect; see docs/config-reference.md#aws-bedrock.
+#
+# Option A (recommended): OpenAI-compatible endpoint. base_url INCLUDES /v1.
+# Supports streaming (SSE) and non-streaming. Covers Anthropic + OpenAI-OSS.
+# [[connections]]
+# name    = "bedrock-eu"
+# base_url = "https://bedrock-runtime.eu-central-1.amazonaws.com/v1"
+# api_key  = "${AWS_BEARER_TOKEN_BEDROCK}"
+# format   = "open_ai"
+# models   = ["eu.anthropic.claude-sonnet-4-6", "openai.gpt-oss-120b"]
+#
+# [connections.model_costs."eu.anthropic.claude-sonnet-4-6"]
+# input_per_1m  = 3.00
+# output_per_1m = 15.00
+#
+# Option B: native InvokeModel. base_url has NO /v1. Callers use the Anthropic
+# Messages body via /v1/messages. Non-streaming only (stream:true → 400).
+# [[connections]]
+# name    = "bedrock-native-eu"
+# base_url = "https://bedrock-runtime.eu-central-1.amazonaws.com"
+# api_key  = "${AWS_BEARER_TOKEN_BEDROCK}"
+# format   = "bedrock"
+# models   = ["anthropic.claude-3-5-sonnet-20241022-v2:0"]
+#
+# [connections.model_costs."anthropic.claude-3-5-sonnet-20241022-v2:0"]
+# input_per_1m  = 3.00
+# output_per_1m = 15.00
+
+# ---------------------------------------------------------------------------
 # [[virtual_keys]] — credentials issued to downstream callers.
 # Keys must start with "sk-drgtw-" and be unique.
 # ---------------------------------------------------------------------------
@@ -115,6 +145,20 @@ models = ["gpt-4o-mini"]
 # Events contain only metadata (tokens, cost, latency, model, key_id) — never
 # request/response content or API keys.  Fire-and-forget: if the receiver is
 # slow or unreachable, events are dropped (never blocks the request path).
+#
+# Per-agent / per-session cost attribution: callers may attach attribution
+# metadata that is copied into the usage event's `metadata` field.  Two
+# sources are merged (a colliding key from a header overrides the body):
+#   1. The request body's top-level `metadata` object (OpenAI / Anthropic
+#      `metadata`, incl. Anthropic `user_id`).  The body is forwarded
+#      unchanged.  Non-string values are JSON-stringified.
+#   2. Request headers prefixed `x-drgtw-meta-` — e.g.
+#      `x-drgtw-meta-session-id: abc` becomes `session-id = "abc"`.  These
+#      headers are STRIPPED before forwarding upstream (never leak to the
+#      provider) and the key is lowercased.
+# Caps: at most 16 keys; keys longer than 64 chars are dropped; values are
+# truncated to 256 chars; excess keys are dropped deterministically in sorted
+# order.  When no metadata is supplied the field is omitted from the event.
 # ---------------------------------------------------------------------------
 # [events]
 # url         = "https://ingest.example.com/llm-usage"   # required; ${VAR} ok
@@ -131,6 +175,48 @@ models = ["gpt-4o-mini"]
 # ---------------------------------------------------------------------------
 # [fallback]
 # enabled = true
+
+# ---------------------------------------------------------------------------
+# [model_aliases] — global alias → target model mapping (optional).
+# A request whose `model` matches an alias key is rewritten to the target
+# BEFORE routing, the virtual-key model allowlist, cost lookup, and usage
+# events — so all downstream logic sees the resolved model.
+#
+# Resolution is ONE LEVEL ONLY: if a target is itself an alias key, it is NOT
+# re-resolved (no recursive chains).  Omit the table (default) for no aliases.
+# ---------------------------------------------------------------------------
+# [model_aliases]
+# fast  = "gpt-4o-mini"
+# smart = "gpt-4o"
+
+# ---------------------------------------------------------------------------
+# [otel] — OpenTelemetry OTLP export (optional, default disabled).
+# Exports request traces and metrics (GenAI semantic conventions) to an OTLP
+# collector.  Privacy: spans and metrics carry ONLY allow-listed metadata
+# (model, connection, status, token counts, cost, latency, key id, pii flag,
+# request id) — never prompt/response content, PII values, or secrets.
+#
+# endpoint               OTLP collector URL.  gRPC convention :4317, HTTP :4318.
+#                        The OTEL_EXPORTER_OTLP_ENDPOINT env var overrides it.
+# protocol               "grpc" (default) or "http" (OTLP/HTTP binary protobuf).
+# traces / metrics       enable each signal independently (both default true).
+# sample_ratio           parent-based trace sampling ratio, 0.0..=1.0 (default 1.0).
+# export_interval_ms     metric push interval (default 10000).
+# export_timeout_ms      per-export deadline (default 5000).
+# metrics_include_key_id include drgtw.key_id as a METRIC label (default false —
+#                        it multiplies cardinality; spans always carry key_id).
+# ---------------------------------------------------------------------------
+# [otel]
+# enabled = true
+# endpoint = "http://localhost:4317"
+# protocol = "grpc"
+# service_name = "drgtw"
+# traces = true
+# metrics = true
+# sample_ratio = 1.0
+# export_interval_ms = 10000
+# export_timeout_ms = 5000
+# metrics_include_key_id = false
 
 # ---------------------------------------------------------------------------
 # [pii] — PII pseudonymization settings.

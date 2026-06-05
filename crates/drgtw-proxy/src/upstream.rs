@@ -27,6 +27,32 @@ pub fn messages_url(base_url: &str) -> String {
     format!("{}/v1/messages", base_url.trim_end_matches('/'))
 }
 
+/// Build the upstream URL for native Bedrock `POST /model/{model}/invoke`.
+///
+/// `base_url` has NO `/v1` (e.g.
+/// `https://bedrock-runtime.eu-central-1.amazonaws.com`). We trim any trailing
+/// slash and append `/model/{model}/invoke`.
+///
+/// Bedrock model ids contain `.` and `-` (URL-safe in a path segment) and a
+/// `:` revision suffix (`anthropic.claude-3-5-sonnet-20241022-v2:0`). The `:`
+/// is percent-encoded to `%3A`; dots and dashes are preserved verbatim.
+pub fn bedrock_invoke_url(base_url: &str, model: &str) -> String {
+    format!(
+        "{}/model/{}/invoke",
+        base_url.trim_end_matches('/'),
+        encode_model_id(model)
+    )
+}
+
+/// Percent-encode a Bedrock model id for use as a single URL path segment.
+///
+/// Only `:` is encoded (to `%3A`); every other character — including `.`, `-`,
+/// and alphanumerics — passes through unchanged, matching how the AWS SDK
+/// path-encodes inference-profile / foundation-model ids.
+fn encode_model_id(model: &str) -> String {
+    model.replace(':', "%3A")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,6 +120,42 @@ mod tests {
         assert_eq!(
             messages_url("https://api.anthropic.com///"),
             "https://api.anthropic.com/v1/messages"
+        );
+    }
+
+    // Bedrock native InvokeModel URL helpers
+    #[test]
+    fn bedrock_invoke_url_basic() {
+        assert_eq!(
+            bedrock_invoke_url(
+                "https://bedrock-runtime.eu-central-1.amazonaws.com",
+                "eu.anthropic.claude-sonnet-4-6"
+            ),
+            "https://bedrock-runtime.eu-central-1.amazonaws.com/model/eu.anthropic.claude-sonnet-4-6/invoke"
+        );
+    }
+
+    #[test]
+    fn bedrock_invoke_url_trims_trailing_slash() {
+        assert_eq!(
+            bedrock_invoke_url(
+                "https://bedrock-runtime.eu-central-1.amazonaws.com///",
+                "openai.gpt-oss-120b"
+            ),
+            "https://bedrock-runtime.eu-central-1.amazonaws.com/model/openai.gpt-oss-120b/invoke"
+        );
+    }
+
+    #[test]
+    fn bedrock_invoke_url_percent_encodes_colon() {
+        // The `:0` revision suffix on a foundation-model id must be encoded to
+        // `%3A0`; dots and dashes are preserved.
+        assert_eq!(
+            bedrock_invoke_url(
+                "https://bedrock-runtime.us-east-1.amazonaws.com",
+                "anthropic.claude-3-5-sonnet-20241022-v2:0"
+            ),
+            "https://bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-3-5-sonnet-20241022-v2%3A0/invoke"
         );
     }
 }

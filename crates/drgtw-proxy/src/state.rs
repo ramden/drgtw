@@ -144,6 +144,7 @@ impl ProxyState {
             cost_tables,
             mcp,
             trace,
+            metrics: None,
         })
     }
 }

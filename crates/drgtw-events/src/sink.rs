@@ -229,6 +229,7 @@ mod tests {
             streamed: false,
             fallback_attempts: 0,
             ts_unix_ms: 1_700_000_000_000,
+            metadata: None,
         }
     }
 

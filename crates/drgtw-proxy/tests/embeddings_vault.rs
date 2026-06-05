@@ -92,6 +92,8 @@ fn openai_config(
         fallback: Default::default(),
         mcp_servers: Default::default(),
         tracing: drgtw_config::TracingConfig { enabled: false, ..Default::default() },
+        model_aliases: Default::default(),
+        otel: Default::default(),
     })
 }
 

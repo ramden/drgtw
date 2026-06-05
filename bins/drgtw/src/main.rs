@@ -4,8 +4,10 @@ use std::path::PathBuf;
 use std::process;
 
 use clap::Parser;
-use drgtw_config::load;
 use drgtw::server;
+use drgtw_config::load;
+use tracing_subscriber::layer::SubscriberExt as _;
+use tracing_subscriber::util::SubscriberInitExt as _;
 use tracing_subscriber::{EnvFilter, fmt};
 
 #[derive(Parser)]
@@ -24,13 +26,9 @@ struct Cli {
 async fn main() {
     let cli = Cli::parse();
 
-    fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .with_writer(std::io::stderr)
-        .init();
-
+    // Config is loaded BEFORE the tracing subscriber so the OTel layer can be
+    // attached to the same `registry()` when `[otel] enabled`. Load failures
+    // are reported via `eprintln!` (no subscriber needed yet).
     let config = match load(&cli.config) {
         Ok(c) => c,
         Err(e) => {
@@ -53,6 +51,9 @@ async fn main() {
         .unwrap_or_else(|| PathBuf::from("."));
 
     if cli.validate_config {
+        // No subscriber and no OTel exporters for the validate path: just a
+        // plain fmt subscriber so any tracing during engine build is visible.
+        init_fmt_only();
         // Also validate PII engine construction (custom recognizer regexes
         // compile and the NER model loads here — both fail boot per WP 3.4/4.4).
         if let Err(e) = server::router(std::sync::Arc::new(config), &base_dir) {
@@ -63,8 +64,44 @@ async fn main() {
         return;
     }
 
-    if let Err(e) = server::run(config, &base_dir).await {
+    // Build the OTel guard (traces + metrics providers) when enabled; `None`
+    // otherwise. On init failure we fail boot — telemetry misconfig should be
+    // loud, consistent with the config-validation rule.
+    let otel_guard = match drgtw_otel::init(&config.otel) {
+        Ok(g) => g,
+        Err(e) => {
+            init_fmt_only();
+            eprintln!("fatal: failed to initialise OpenTelemetry: {e}");
+            process::exit(1);
+        }
+    };
+
+    // Layered registry: EnvFilter + stderr fmt layer (KEPT) + optional OTel
+    // span layer (only when traces are enabled). The `drgtw-trace` JSONL writer
+    // and the fmt output are unaffected by the OTel layer's presence.
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let registry = tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt::layer().with_writer(std::io::stderr));
+
+    match otel_guard.as_ref().and_then(|g| g.tracer_provider()) {
+        Some(tp) => registry.with(drgtw_otel::tracer_layer(tp)).init(),
+        None => registry.init(),
+    }
+
+    if let Err(e) = server::run(config, &base_dir, otel_guard).await {
         eprintln!("fatal: {e}");
         process::exit(1);
     }
+}
+
+/// Install a plain stderr fmt subscriber (no OTel layer). Used by the
+/// `--validate-config` path and OTel-init failure path.
+fn init_fmt_only() {
+    let _ = fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .with_writer(std::io::stderr)
+        .try_init();
 }

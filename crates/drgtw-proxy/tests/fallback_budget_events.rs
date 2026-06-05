@@ -171,6 +171,8 @@ async fn test_fallback_503_then_200_records_attempt_and_connection() {
         fallback: Default::default(),
         mcp_servers: Default::default(),
         tracing: drgtw_config::TracingConfig { enabled: false, ..Default::default() },
+        model_aliases: Default::default(),
+        otel: Default::default(),
     });
 
     let app = test_router(config);
@@ -246,6 +248,8 @@ async fn test_fallback_disabled_relays_503_no_second_attempt() {
         fallback: drgtw_config::FallbackConfig { enabled: false },
         mcp_servers: Default::default(),
         tracing: drgtw_config::TracingConfig { enabled: false, ..Default::default() },
+        model_aliases: Default::default(),
+        otel: Default::default(),
     });
 
     let app = test_router(config);
@@ -307,6 +311,8 @@ async fn test_non_retriable_400_no_failover() {
         fallback: Default::default(),
         mcp_servers: Default::default(),
         tracing: drgtw_config::TracingConfig { enabled: false, ..Default::default() },
+        model_aliases: Default::default(),
+        otel: Default::default(),
     });
 
     let app = test_router(config);
@@ -368,6 +374,8 @@ async fn test_all_candidates_fail_relays_last() {
         fallback: Default::default(),
         mcp_servers: Default::default(),
         tracing: drgtw_config::TracingConfig { enabled: false, ..Default::default() },
+        model_aliases: Default::default(),
+        otel: Default::default(),
     });
 
     let app = test_router(config);
@@ -432,6 +440,8 @@ async fn test_budget_exhausted_after_first_request() {
         fallback: Default::default(),
         mcp_servers: Default::default(),
         tracing: drgtw_config::TracingConfig { enabled: false, ..Default::default() },
+        model_aliases: Default::default(),
+        otel: Default::default(),
     });
 
     let app = test_router(config);
@@ -511,6 +521,8 @@ async fn test_event_non_stream_fields() {
         fallback: Default::default(),
         mcp_servers: Default::default(),
         tracing: drgtw_config::TracingConfig { enabled: false, ..Default::default() },
+        model_aliases: Default::default(),
+        otel: Default::default(),
     });
 
     let app = test_router(config);
@@ -586,6 +598,8 @@ async fn test_event_stream_openai_usage() {
         fallback: Default::default(),
         mcp_servers: Default::default(),
         tracing: drgtw_config::TracingConfig { enabled: false, ..Default::default() },
+        model_aliases: Default::default(),
+        otel: Default::default(),
     });
 
     let app = test_router(config);
@@ -675,6 +689,8 @@ async fn test_event_stream_anthropic_usage() {
         fallback: Default::default(),
         mcp_servers: Default::default(),
         tracing: drgtw_config::TracingConfig { enabled: false, ..Default::default() },
+        model_aliases: Default::default(),
+        otel: Default::default(),
     });
 
     let app = test_router(config);
@@ -749,6 +765,8 @@ async fn test_auth_failure_emits_no_event() {
         fallback: Default::default(),
         mcp_servers: Default::default(),
         tracing: drgtw_config::TracingConfig { enabled: false, ..Default::default() },
+        model_aliases: Default::default(),
+        otel: Default::default(),
     });
 
     let app = test_router(config);
@@ -809,6 +827,8 @@ async fn test_upstream_error_emits_event() {
         fallback: Default::default(),
         mcp_servers: Default::default(),
         tracing: drgtw_config::TracingConfig { enabled: false, ..Default::default() },
+        model_aliases: Default::default(),
+        otel: Default::default(),
     });
 
     let app = test_router(config);

@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 drgtw-config.workspace = true
+drgtw-otel.workspace = true
 drgtw-pii.workspace = true
 drgtw-proxy.workspace = true
 
