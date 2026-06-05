@@ -788,7 +788,7 @@ dependencies = [
 
 [[package]]
 name = "drgtw"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "axum",
  "bytes",
@@ -810,7 +810,7 @@ dependencies = [
 
 [[package]]
 name = "drgtw-bench"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "axum",
  "clap",
@@ -828,7 +828,7 @@ dependencies = [
 
 [[package]]
 name = "drgtw-config"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "serde",
  "tempfile",
@@ -839,7 +839,7 @@ dependencies = [
 
 [[package]]
 name = "drgtw-events"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
@@ -852,7 +852,7 @@ dependencies = [
 
 [[package]]
 name = "drgtw-keys"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "drgtw-config",
  "http 1.4.1",
@@ -862,7 +862,7 @@ dependencies = [
 
 [[package]]
 name = "drgtw-mcp"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "futures",
  "reqwest 0.12.28",
@@ -877,7 +877,7 @@ dependencies = [
 
 [[package]]
 name = "drgtw-ner"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "ndarray 0.16.1",
  "ort",
@@ -890,7 +890,7 @@ dependencies = [
 
 [[package]]
 name = "drgtw-otel"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "drgtw-config",
@@ -910,7 +910,7 @@ dependencies = [
 
 [[package]]
 name = "drgtw-pii"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "drgtw-config",
  "drgtw-ner",
@@ -925,7 +925,7 @@ dependencies = [
 
 [[package]]
 name = "drgtw-proxy"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "aws-credential-types",
  "aws-sigv4",
@@ -963,7 +963,7 @@ dependencies = [
 
 [[package]]
 name = "drgtw-trace"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "filetime",
  "flate2",
@@ -977,7 +977,7 @@ dependencies = [
 
 [[package]]
 name = "drgtw-vault"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "aes-gcm",
  "hex",
