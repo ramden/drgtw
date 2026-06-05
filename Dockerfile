@@ -67,6 +67,7 @@ COPY crates/drgtw-events/Cargo.toml  crates/drgtw-events/Cargo.toml
 COPY crates/drgtw-vault/Cargo.toml   crates/drgtw-vault/Cargo.toml
 COPY crates/drgtw-mcp/Cargo.toml     crates/drgtw-mcp/Cargo.toml
 COPY crates/drgtw-trace/Cargo.toml   crates/drgtw-trace/Cargo.toml
+COPY crates/drgtw-otel/Cargo.toml    crates/drgtw-otel/Cargo.toml
 
 RUN set -e; \
     for member in \
@@ -81,6 +82,7 @@ RUN set -e; \
         crates/drgtw-vault \
         crates/drgtw-mcp \
         crates/drgtw-trace \
+        crates/drgtw-otel \
     ; do \
         mkdir -p "$member/src"; \
         printf 'pub fn _stub(){}' > "$member/src/lib.rs"; \
