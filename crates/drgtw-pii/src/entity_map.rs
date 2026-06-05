@@ -192,7 +192,7 @@ impl EntityMap {
             .iter()
             .map(|(ph, orig)| (ph.as_str(), orig.as_str()))
             .collect();
-        placeholders.sort_unstable_by(|a, b| b.0.len().cmp(&a.0.len()));
+        placeholders.sort_unstable_by_key(|(ph, _)| std::cmp::Reverse(ph.len()));
 
         let bytes = text.as_bytes();
         let len = bytes.len();

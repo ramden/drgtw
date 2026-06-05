@@ -136,7 +136,7 @@ impl StreamRestorer {
             })
             .collect();
         // Longest first → greedy longest-match replacement.
-        entries.sort_by(|a, b| b.placeholder.len().cmp(&a.placeholder.len()));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.placeholder.len()));
 
         let max_ph_len = view.max_ph_len();
 
