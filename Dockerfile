@@ -16,7 +16,7 @@
 # NOTE: bump RUST_VERSION when Cargo.lock requires a newer rustc.
 # ---------------------------------------------------------------------------
 
-ARG RUST_VERSION=1.88.0
+ARG RUST_VERSION=1.93.0
 
 # ---- builder ---------------------------------------------------------------
 FROM ubuntu:24.04 AS builder
