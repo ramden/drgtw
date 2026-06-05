@@ -1,0 +1,192 @@
+# drgtw.toml.example — annotated example configuration for DRGTW gateway.
+# Copy to drgtw.toml and adjust before running.
+
+# ---------------------------------------------------------------------------
+# [server] — optional; all fields have defaults.
+# ---------------------------------------------------------------------------
+[server]
+# Address and port the gateway listens on.
+# Default: "127.0.0.1:8080"
+bind_addr = "127.0.0.1:8080"
+
+# ---------------------------------------------------------------------------
+# [[connections]] — one table per upstream provider.
+# Each connection has a unique name, a base URL, an API key, a wire format,
+# and the list of model names it serves.
+# ---------------------------------------------------------------------------
+
+[[connections]]
+# Unique identifier referenced by virtual keys.
+name = "openai-main"
+# Absolute http(s) base URL of the upstream.  No query string or fragment.
+base_url = "https://api.openai.com"
+# Upstream API key.  ${VAR} is expanded from the environment at startup;
+# an unset variable is a hard startup error.
+api_key = "${OPENAI_API_KEY}"
+# Wire format this upstream speaks.  Must be "open_ai" or "anthropic".
+format = "open_ai"
+# Models served through this connection.
+models = [
+  "gpt-4o",
+  "gpt-4o-mini",
+  "gpt-4-turbo",
+  "o1-preview",
+  "o1-mini",
+]
+
+[[connections]]
+name = "anthropic-main"
+base_url = "https://api.anthropic.com"
+api_key = "${ANTHROPIC_API_KEY}"
+format = "anthropic"
+models = [
+  "claude-opus-4-5",
+  "claude-sonnet-4-5",
+  "claude-haiku-4-5",
+]
+
+# ---------------------------------------------------------------------------
+# Model costs — per-connection USD pricing for cost accounting.
+# Both fields are USD per 1 000 000 tokens.  Keys may be exact model names
+# or trailing-wildcard patterns ("gpt-*").  Exact beats wildcard; among
+# wildcards the longest prefix wins.  Omit the block to disable cost tracking
+# for this connection.
+# ---------------------------------------------------------------------------
+# [connections.model_costs."gpt-4o"]
+# input_per_1m  = 2.50
+# output_per_1m = 10.00
+#
+# [connections.model_costs."gpt-4o-mini"]
+# input_per_1m  = 0.15
+# output_per_1m = 0.60
+#
+# # Wildcard covers any gpt-* model not explicitly listed above.
+# [connections.model_costs."gpt-*"]
+# input_per_1m  = 1.00
+# output_per_1m = 4.00
+
+# ---------------------------------------------------------------------------
+# Second connection for the same model enables cross-connection fallback.
+# When openai-main returns a retriable error (connect error, 502/503/504/429)
+# the gateway transparently retries against openai-backup.
+# ---------------------------------------------------------------------------
+# [[connections]]
+# name    = "openai-backup"
+# base_url = "https://api.openai.com"
+# api_key  = "${OPENAI_API_KEY_BACKUP}"
+# format   = "open_ai"
+# models   = ["gpt-4o", "gpt-4o-mini"]
+
+# ---------------------------------------------------------------------------
+# [[virtual_keys]] — credentials issued to downstream callers.
+# Keys must start with "sk-drgtw-" and be unique.
+# ---------------------------------------------------------------------------
+
+[[virtual_keys]]
+# This key is accepted by callers using stock OpenAI or Anthropic SDKs.
+key = "sk-drgtw-all-models-example-key-001"
+# All connections this key may route to.
+connections = ["openai-main", "anthropic-main"]
+# No models list → all models of the listed connections are allowed.
+
+[[virtual_keys]]
+key = "sk-drgtw-restricted-example-key-002"
+# Restrict to a single connection.
+connections = ["openai-main"]
+# Optional model allowlist.  Requests for models not in this list are rejected.
+models = ["gpt-4o-mini"]
+# Optional per-key token-bucket rate limit.  Both fields must be > 0.
+# rate_limit = { requests = 100, per_seconds = 60 }
+
+# Virtual key with a USD spend budget.
+# Spend is computed from model_costs; exhausted → 429 with retry-after header.
+# Budget windows are in-memory only — restarting the gateway resets counters.
+# [[virtual_keys]]
+# key         = "sk-drgtw-budgeted-example-key-003"
+# connections = ["openai-main"]
+#
+# [virtual_keys.budget]
+# max_usd     = 10.00   # reject once this USD spend is exceeded in the window
+# per_seconds = 86400   # window length in seconds (86400 = 24 h)
+
+# ---------------------------------------------------------------------------
+# [events] — usage event webhook (optional).
+# The gateway POSTs one JSON event per completed proxied request to `url`.
+# Events contain only metadata (tokens, cost, latency, model, key_id) — never
+# request/response content or API keys.  Fire-and-forget: if the receiver is
+# slow or unreachable, events are dropped (never blocks the request path).
+# ---------------------------------------------------------------------------
+# [events]
+# url         = "https://ingest.example.com/llm-usage"   # required; ${VAR} ok
+# auth_bearer = "${EVENTS_TOKEN}"                         # optional Bearer token
+# buffer_size = 1024                                      # queue depth (default 1024)
+# timeout_ms  = 5000                                      # per-POST timeout ms (default 5000)
+
+# ---------------------------------------------------------------------------
+# [fallback] — cross-connection fallback routing (on by default).
+# When a model is served by multiple connections, retriable upstream failures
+# (connect error, 502/503/504, 429) automatically try the next candidate in
+# the connections list.  Streaming fails over only before the first byte.
+# Set enabled = false to always use only the first matching connection.
+# ---------------------------------------------------------------------------
+# [fallback]
+# enabled = true
+
+# ---------------------------------------------------------------------------
+# [pii] — PII pseudonymization settings.
+# ---------------------------------------------------------------------------
+[pii]
+# Default mode when the caller sends no x-drgtw-pii header.
+# Per-request override via the x-drgtw-pii: on|off header.
+enabled_by_default = true
+# Built-in recognizers to disable by name.  Built-ins: email, phone, iban,
+# credit_card.  Empty (default) = all built-ins active.
+# disabled_recognizers = ["phone"]
+
+# ---------------------------------------------------------------------------
+# [pii.vault] — optional persistent encrypted entity vault.  Omit to disable.
+# When absent (default), placeholder mappings live in request-scoped memory
+# only.  When present, mappings are stable ACROSS requests and restarts: it
+# enables embeddings/RAG consistency and lets later non-streaming responses
+# restore placeholders left by past requests.
+#
+# Original values are encrypted at rest with AES-256-GCM; value lookups go
+# through a keyed blind index — the plaintext is NEVER stored in the database.
+# Protect the file and the key like crown jewels: lose the key and every
+# mapping is unrecoverable.
+# ---------------------------------------------------------------------------
+# [pii.vault]
+# Path to the SQLite database file.  Required, must not be empty.  ${VAR}
+# expanded from the environment; a relative path is resolved against the
+# config file directory.
+# path = "vault.db"
+# Master key: exactly 64 hex characters (32 bytes).  ${VAR} expanded from the
+# environment.  Generate with: openssl rand -hex 32
+# key = "${DRGTW_VAULT_KEY}"
+
+# ---------------------------------------------------------------------------
+# [[pii.custom_recognizers]] — additional regex-based recognizers.
+# placeholder = uppercased name (TICKET_1); invalid regex fails boot.
+# ---------------------------------------------------------------------------
+# [[pii.custom_recognizers]]
+# name = "ticket"
+# pattern = "TKT-[0-9]{4,8}"
+
+# ---------------------------------------------------------------------------
+# [pii.ner] — optional named-entity recognition.  Omit to disable NER.
+# ---------------------------------------------------------------------------
+# [pii.ner]
+# Path to the model directory.  Required.  ${VAR} expanded from the
+# environment; a relative path is resolved against the config file directory.
+# model_dir = "models/ner-multilingual"
+# Minimum per-span score to emit a detection.  Range 0.0..=1.0.
+# score_threshold = 0.5
+# Behaviour when NER inference errors.  "open" forwards unmasked;
+# "closed" returns 503 instead of forwarding unmasked.
+# fail_mode = "open"
+# Per-request timeout in milliseconds.  Must be > 0.
+# timeout_ms = 5000
+# Number of NER worker threads.  Must be > 0.
+# workers = 2
+# Max pending requests in the NER queue.  Must be > 0.
+# queue_capacity = 64

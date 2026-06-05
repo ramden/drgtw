@@ -1,0 +1,24 @@
+[package]
+name = "drgtw-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "drgtw-bench"
+path = "src/main.rs"
+
+[dependencies]
+drgtw-config.workspace = true
+drgtw-proxy.workspace = true
+
+axum.workspace = true
+clap.workspace = true
+libc.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

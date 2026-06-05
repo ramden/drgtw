@@ -1,0 +1,62 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/drgtw-config",
+    "crates/drgtw-keys",
+    "crates/drgtw-ner",
+    "crates/drgtw-pii",
+    "crates/drgtw-proxy",
+    "crates/drgtw-events",
+    "crates/drgtw-trace",
+    "crates/drgtw-mcp",
+    "crates/drgtw-vault",
+    "bins/drgtw",
+    "bins/drgtw-bench",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+drgtw-config = { path = "crates/drgtw-config" }
+drgtw-keys = { path = "crates/drgtw-keys" }
+drgtw-ner = { path = "crates/drgtw-ner" }
+drgtw-pii = { path = "crates/drgtw-pii" }
+drgtw-proxy = { path = "crates/drgtw-proxy" }
+drgtw-events = { path = "crates/drgtw-events" }
+drgtw-trace = { path = "crates/drgtw-trace" }
+drgtw-mcp = { path = "crates/drgtw-mcp" }
+drgtw-vault = { path = "crates/drgtw-vault" }
+
+axum = "0.8"
+bytes = "1"
+futures = "0.3"
+http = "1"
+ndarray = "0.16"
+ort = "2.0.0-rc.10"
+proptest = "1"
+regex = "1"
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
+serde_json = "1"
+subtle = "2"
+tower = "0.5"
+wiremock = "0.6"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+libc = "0.2"
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "net", "time", "process"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+aes-gcm = "0.10"
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"

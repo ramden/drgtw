@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 09b35d0a605b4696f72c5f37a1bdbb730d359b9ea562319b2e4221f30aac5a68 # shrinks to original = "", noise_before = "a", noise_after = "", split = 8
+cc aa07a5566ba355309922f3b371f805d60273337bb4d11f71e5e88fc93baf9de7 # shrinks to pairs = [("EMAIL_1", " ")], text = "EMAIL_1", split_positions = []
+cc ba26715b71db485d995e4462393a451ced30652f762385563d110de8a0a9d612 # shrinks to pairs = [("EMAIL_1", "A")], text = "unicode: ñ ü 日 ", split_positions = []

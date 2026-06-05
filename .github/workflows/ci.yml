@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  rust:
+    name: Rust (build + test + clippy)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      # Build the entire workspace.
+      - name: cargo build
+        run: cargo build --workspace
+
+      # Run all tests except drgtw-ner (needs 178 MB ONNX model not in repo).
+      # Unit tests inside drgtw-ner that don't load the model are run separately.
+      - name: cargo test (workspace, excluding drgtw-ner integration)
+        run: cargo test --workspace --exclude drgtw-ner
+
+      - name: cargo test drgtw-ner (lib/unit only)
+        run: cargo test -p drgtw-ner --lib
+
+      # Clippy with warnings promoted to errors.
+      - name: clippy
+        run: cargo clippy --workspace -- -D warnings
+
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: drgtw:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

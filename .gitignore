@@ -1,0 +1,24 @@
+/target
+**/*.rs.bk
+
+# Working docs — local only, never committed (see CLAUDE.md)
+/md/
+
+# Secrets
+/.env
+
+# Model artifacts — large binaries, never committed
+/models/
+
+# Live local config (use drgtw.toml.example as template)
+/drgtw.toml
+
+# Runtime trace output (see [tracing] in docs/config-reference.md)
+traces/
+
+# Project instructions — local only
+/CLAUDE.md
+
+# Local demo overrides (internal resource names)
+demo/*.local.toml
+demo/compose.override.yml

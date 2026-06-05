@@ -1,0 +1,56 @@
+[project]
+name = "drgtw-training"
+version = "0.1.0"
+description = "DRGTW Phase 5 — NER training/tuning module: fine-tune token-classification models and export gateway-compatible ONNX artifacts."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "proprietary" }
+
+# Core deps: train + export must work WITHOUT presidio/spacy (those are the
+# `annotate` extra). Torch is pinned to the CPU wheel index below.
+dependencies = [
+    "transformers>=4.40,<5.0",
+    "torch>=2.2,<3.0",
+    "accelerate>=0.26,<2.0",
+    "datasets>=2.18,<4.0",
+    "seqeval>=1.2.2,<2.0",
+    "onnx>=1.16,<2.0",
+    "onnxruntime>=1.17,<2.0",
+    "faker>=25.0,<40.0",
+    "numpy>=1.26,<3.0",
+]
+
+[project.optional-dependencies]
+# Pre-annotation with Presidio + spaCy. Heavy + a separate spaCy model
+# download is required (see training-guide.md). Intentionally NOT a core dep.
+annotate = [
+    "presidio-analyzer>=2.2,<3.0",
+    "spacy>=3.7,<4.0",
+]
+dev = [
+    "pytest>=8.0,<9.0",
+]
+
+[project.scripts]
+drgtw-training = "drgtw_training.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["drgtw_training"]
+
+# Pin torch to the CPU wheel index so the smoke test stays small + CPU-only.
+[tool.uv]
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

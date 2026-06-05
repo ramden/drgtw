@@ -1,0 +1,41 @@
+# Build artifacts
+target/
+
+# Version control
+.git/
+.gitignore
+
+# Documentation (not needed in image)
+*.md
+docs/
+
+# Configuration with secrets — never bake into image; mount at runtime
+.env
+.env.*
+drgtw.toml
+*.toml.local
+
+# Runtime data — mount at runtime
+models/
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# Training / dev tooling
+training/
+training/.venv/
+*.ipynb
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# CI / GitHub
+.github/
+
+# Test fixtures that may contain PII samples
+tests/fixtures/

@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DRGTW — PII Transformation Demo</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">DRGTW</span>
+      <span class="tagline">privacy-first LLM gateway — watch PII get pseudonymized end-to-end</span>
+    </div>
+    <div id="status-pill" class="pill pill-idle">ready</div>
+  </header>
+
+  <main id="chat" class="chat">
+    <div class="hint" id="empty-hint">
+      <p>Chat normally. Type a message that includes a <strong>name</strong>,
+      <strong>email</strong>, or <strong>phone number</strong> and press Send.</p>
+      <p>Your message and the reply read like an ordinary chat. Under each
+      message is a <strong>“behind the scenes”</strong> toggle that reveals what
+      the provider actually saw (pseudonymized) and the raw response before
+      DRGTW restored it.</p>
+    </div>
+  </main>
+
+  <form id="composer" class="composer" autocomplete="off">
+    <input
+      id="input"
+      class="input"
+      type="text"
+      placeholder="e.g. Hi, I'm Jane Doe, email jane.doe@example.com — can you help?"
+      aria-label="Message"
+    />
+    <button id="send" class="send" type="submit">Send</button>
+  </form>
+
+  <script src="app.js"></script>
+</body>
+</html>

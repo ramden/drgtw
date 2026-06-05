@@ -1,0 +1,21 @@
+[package]
+name = "drgtw-trace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["sync", "rt", "macros", "time"] }
+tracing.workspace = true
+tar = "0.4"
+flate2 = "1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+tempfile.workspace = true
+serde_json.workspace = true
+filetime = "0.2"
+flate2 = "1"
+tar = "0.4"

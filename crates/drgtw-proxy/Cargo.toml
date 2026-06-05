@@ -1,0 +1,33 @@
+[package]
+name = "drgtw-proxy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+drgtw-config.workspace = true
+drgtw-keys.workspace = true
+drgtw-events.workspace = true
+drgtw-mcp.workspace = true
+drgtw-pii.workspace = true
+drgtw-trace.workspace = true
+drgtw-vault.workspace = true
+
+axum.workspace = true
+bytes.workspace = true
+futures.workspace = true
+hex.workspace = true
+http.workspace = true
+reqwest.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+wiremock.workspace = true
+tower.workspace = true
+tempfile.workspace = true
+regex.workspace = true
+http-body-util = "0.1"

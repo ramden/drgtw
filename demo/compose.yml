@@ -1,0 +1,37 @@
+# DRGTW demo — privacy-first LLM gateway + PII-transformation portal.
+#
+# Quickstart:
+#   export OPENAI_API_KEY=sk-...        # or put it in ../.env
+#   docker compose -f demo/compose.yml up --build
+#   open http://localhost:8081
+#
+# The gateway image is built LOCALLY from the repo Dockerfile (never pulled).
+# The portal is plain nginx serving static files AND reverse-proxying /v1/* to
+# the gateway, so the browser only ever talks to one origin (no CORS needed).
+
+services:
+  gateway:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: drgtw:local
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./gateway-config.toml:/app/drgtw.toml:ro
+    # Pass OPENAI_API_KEY through from the host shell or ../.env. The value is
+    # interpolated into gateway-config.toml at runtime via ${OPENAI_API_KEY}.
+    environment:
+      - OPENAI_API_KEY
+    restart: unless-stopped
+
+  portal:
+    image: nginx:alpine
+    ports:
+      - "8081:80"
+    volumes:
+      - ./portal:/usr/share/nginx/html:ro
+      - ./portal-nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - gateway
+    restart: unless-stopped

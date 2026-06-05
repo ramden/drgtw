@@ -1,0 +1,54 @@
+# DRGTW demo gateway config.
+#
+# set OPENAI_API_KEY in your shell or ../.env before `docker compose up`.
+# (compose passes it through to the container; ${OPENAI_API_KEY} below is
+# expanded by the gateway at startup — an unset variable is a hard error.)
+
+[server]
+# Bind on all interfaces INSIDE the container so the published port works.
+bind_addr = "0.0.0.0:8080"
+
+# ---------------------------------------------------------------------------
+# One upstream connection: OpenAI, serving gpt-4o-mini.
+# ---------------------------------------------------------------------------
+[[connections]]
+name = "openai"
+base_url = "https://api.openai.com"
+api_key = "${OPENAI_API_KEY}"
+format = "open_ai"
+models = ["gpt-4o-mini"]
+
+# ---------------------------------------------------------------------------
+# One virtual key the portal authenticates with (must start with sk-drgtw-).
+# ---------------------------------------------------------------------------
+[[virtual_keys]]
+key = "sk-drgtw-demo-key"
+connections = ["openai"]
+models = ["gpt-4o-mini"]
+
+# ---------------------------------------------------------------------------
+# PII pseudonymization. enabled_by_default is already true in current builds
+# (privacy-first); set explicitly here so the demo is self-documenting.
+# ---------------------------------------------------------------------------
+[pii]
+enabled_by_default = true
+
+# ---------------------------------------------------------------------------
+# Filesystem request tracing. On by default (JSONL in traces/, auto-rotated
+# and tar.gz-archived logrotate-style). Shown explicitly so the demo is
+# self-documenting; set enabled = false to turn it off. See docs/config-reference.md.
+# ---------------------------------------------------------------------------
+[tracing]
+enabled = true
+retention_days = 90
+
+# ---------------------------------------------------------------------------
+# MCP gateway: aggregate upstream Model Context Protocol servers under /mcp.
+# Tools are exposed namespaced as <server>-<tool>. context7 is a public MCP
+# server for library docs and needs no auth. See docs/mcp.md for the full
+# schema, routing semantics, and client setup.
+# ---------------------------------------------------------------------------
+[mcp_servers.context7]
+url = "https://mcp.context7.com/mcp"
+description = "up-to-date library documentation"
+auth_type = "none"
