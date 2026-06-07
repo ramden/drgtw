@@ -47,6 +47,7 @@ fn engine_disabled_recognizers_suppressed() {
         custom_recognizers: vec![],
         ner: None,
         vault: None,
+        embeddings_require_vault: false,
     };
     let engine = PiiEngine::from_config(&cfg).unwrap();
     let text = "alice@example.com DE89370400440532013000";
@@ -73,6 +74,7 @@ fn engine_custom_recognizer_fires() {
         }],
         ner: None,
         vault: None,
+        embeddings_require_vault: false,
     };
     let engine = PiiEngine::from_config(&cfg).unwrap();
     let text = "Your order ORD-123456 is shipped.";
@@ -93,6 +95,7 @@ fn engine_invalid_custom_regex_is_engine_error() {
         }],
         ner: None,
         vault: None,
+        embeddings_require_vault: false,
     };
     let result = PiiEngine::from_config(&cfg);
     assert!(matches!(result, Err(EngineError::InvalidRegex { .. })));

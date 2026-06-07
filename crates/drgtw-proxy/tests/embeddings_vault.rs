@@ -91,6 +91,7 @@ fn openai_config(
             custom_recognizers: vec![],
             ner: None,
             vault,
+            ..Default::default()
         },
         events: None,
         fallback: Default::default(),
@@ -738,4 +739,94 @@ async fn test_embeddings_input_only_cost_does_not_error() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+}
+
+// ---------------------------------------------------------------------------
+// 11. embeddings_require_vault (WP 9.4): enforced at boot, not per request.
+// ---------------------------------------------------------------------------
+
+/// Build a config with PII on, no vault, and `embeddings_require_vault` set.
+fn config_require_vault_no_vault(mock_base_url: &str) -> Arc<Config> {
+    let mut cfg = (*openai_config(mock_base_url, true, None, false)).clone();
+    cfg.pii.embeddings_require_vault = true;
+    Arc::new(cfg)
+}
+
+/// flag on + vault configured → normal success with stable placeholders.
+#[tokio::test]
+async fn test_require_vault_with_vault_succeeds() {
+    let mock = MockServer::start().await;
+    mount_embeddings_ok(&mock).await;
+
+    let dir = TempDir::new().unwrap();
+    let mut cfg = (*openai_config(
+        &mock.uri(),
+        true,
+        Some(vault_config(&dir, VAULT_KEY)),
+        false,
+    ))
+    .clone();
+    cfg.pii.embeddings_require_vault = true;
+    let app = build_router(Arc::new(cfg));
+
+    let body = json!({"model": "text-embedding-3-small", "input": "to max@example.com"});
+    let resp = app
+        .oneshot(embeddings_request(&body.to_string()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let received = mock.received_requests().await.unwrap();
+    let up: Value = serde_json::from_slice(&received[0].body).unwrap();
+    let placeholder = up["input"].as_str().unwrap();
+    // Vault placeholders: high-entropy digit suffix, raw value never leaked.
+    let re = regex::Regex::new(r"EMAIL_[0-9]{12,}").unwrap();
+    assert!(re.is_match(placeholder), "stable placeholder: {placeholder}");
+    assert!(
+        !placeholder.contains("max@example.com"),
+        "raw email must not leak: {placeholder}"
+    );
+}
+
+/// flag off (default) + no vault → current behavior unchanged: success with
+/// per-request counter placeholders.
+#[tokio::test]
+async fn test_no_require_vault_no_vault_unchanged() {
+    let mock = MockServer::start().await;
+    mount_embeddings_ok(&mock).await;
+
+    // Flag defaults to false; PII on; no vault.
+    let app = build_router(openai_config(&mock.uri(), true, None, false));
+
+    let body = json!({"model": "text-embedding-3-small", "input": "to max@example.com"});
+    let resp = app
+        .oneshot(embeddings_request(&body.to_string()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let received = mock.received_requests().await.unwrap();
+    let up: Value = serde_json::from_slice(&received[0].body).unwrap();
+    let placeholder = up["input"].as_str().unwrap();
+    // Storeless per-request counter placeholder (EMAIL_1, ...).
+    let re = regex::Regex::new(r"EMAIL_[0-9]+").unwrap();
+    assert!(re.is_match(placeholder), "counter placeholder: {placeholder}");
+    assert!(
+        !placeholder.contains("max@example.com"),
+        "raw email must not leak: {placeholder}"
+    );
+}
+
+/// flag on + no vault → ProxyState boot fails loudly (config contradiction).
+#[test]
+fn test_boot_fails_when_require_vault_without_vault() {
+    let cfg = config_require_vault_no_vault("http://127.0.0.1:1");
+    let err = ProxyState::new(cfg, Path::new("."))
+        .expect_err("require_vault without a vault must fail boot");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("embeddings_require_vault"),
+        "error mentions the flag: {msg}"
+    );
+    assert!(msg.contains("[pii.vault]"), "error mentions the vault: {msg}");
 }

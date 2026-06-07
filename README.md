@@ -381,6 +381,13 @@ for chat.
 With `[pii.vault]` enabled, the placeholders assigned here are stable and shared
 with chat requests — the basis of the embeddings/RAG consistency guarantee.
 
+Without a vault, embeddings placeholders are per-request counters that differ
+across requests, so the gateway logs a boot-time warning that cross-request
+vector consistency is not guaranteed. To require the vault instead, set
+`pii.embeddings_require_vault = true`: with no `[pii.vault]` configured the
+gateway refuses to start (fail-closed) rather than serving inconsistent
+placeholders.
+
 ### `[tracing]` — filesystem request tracing
 
 **On by default.** JSONL traces are written to a `traces/` directory (relative to

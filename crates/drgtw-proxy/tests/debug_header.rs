@@ -74,6 +74,7 @@ fn openai_pii_config(mock_base_url: &str, pii_enabled: bool) -> Arc<Config> {
             custom_recognizers: vec![],
             ner: None,
             vault: None,
+            embeddings_require_vault: false,
         },
         events: None,
         fallback: Default::default(),

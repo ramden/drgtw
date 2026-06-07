@@ -204,6 +204,14 @@ pub struct PiiConfig {
     /// both `path` and `key` are required.
     #[serde(default)]
     pub vault: Option<VaultConfig>,
+    /// Require the persistent vault for `/v1/embeddings`. When `true` and no
+    /// `[pii.vault]` is configured, embeddings requests that engage the PII
+    /// pipeline are rejected rather than served with per-request placeholders
+    /// (which are inconsistent across requests and break embedding-index/RAG
+    /// consistency). Defaults to `false` — the vault may be intentionally
+    /// absent in development.
+    #[serde(default)]
+    pub embeddings_require_vault: bool,
 }
 
 /// Persistent encrypted entity-vault configuration (WP 9.1).
@@ -229,6 +237,7 @@ impl Default for PiiConfig {
             custom_recognizers: Vec::new(),
             ner: None,
             vault: None,
+            embeddings_require_vault: false,
         }
     }
 }
@@ -2784,6 +2793,36 @@ key = "${DRGTW_TEST_VAULT_MISSING_XYZ}"
         let toml = format!("[pii.vault]\npath = \"vault.db\"\nkey = \"{key}\"\n");
         let cfg = load_toml(&toml).expect("uppercase hex is valid");
         assert_eq!(cfg.pii.vault.as_ref().unwrap().key, key);
+    }
+
+    #[test]
+    fn test_embeddings_require_vault_default_false() {
+        let cfg = load_toml("").expect("empty config");
+        assert!(
+            !cfg.pii.embeddings_require_vault,
+            "embeddings_require_vault should default to false"
+        );
+    }
+
+    #[test]
+    fn test_embeddings_require_vault_parsed_without_vault() {
+        // Flag may be set even when no `[pii.vault]` is present — this is not a
+        // validation error (the contradiction is resolved at boot, not here).
+        let toml = "[pii]\nembeddings_require_vault = true\n";
+        let cfg = load_toml(toml).expect("flag without vault still parses");
+        assert!(cfg.pii.embeddings_require_vault);
+        assert!(cfg.pii.vault.is_none(), "vault still absent");
+    }
+
+    #[test]
+    fn test_embeddings_require_vault_parsed_with_vault() {
+        let key = "a".repeat(64);
+        let toml = format!(
+            "[pii]\nembeddings_require_vault = true\n\n[pii.vault]\npath = \"vault.db\"\nkey = \"{key}\"\n"
+        );
+        let cfg = load_toml(&toml).expect("flag with vault parses");
+        assert!(cfg.pii.embeddings_require_vault);
+        assert!(cfg.pii.vault.is_some(), "vault present");
     }
 
     // -----------------------------------------------------------------------

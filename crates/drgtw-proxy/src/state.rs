@@ -51,6 +51,15 @@ impl ProxyState {
             None => None,
         };
 
+        // Embeddings vault posture (WP 9.4). When no vault is configured the
+        // embeddings placeholders are per-request counters — fine for one-off
+        // requests, but they break embedding-index/RAG consistency because the
+        // same entity maps to a different placeholder on each request. If the
+        // operator demanded the vault (`pii.embeddings_require_vault = true`)
+        // this is a config contradiction and must fail boot (consistent with
+        // the vault-open failure above); otherwise emit one boot-time warning.
+        check_embeddings_vault_posture(&config)?;
+
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             // Intentionally no .timeout() — streaming responses must flow freely.
@@ -227,4 +236,89 @@ fn open_vault_store(
         .map_err(|e| EngineBuildError::Vault(format!("{e} (path: {})", path.display())))?;
 
     Ok(Arc::new(VaultStore::new(Arc::new(vault))))
+}
+
+/// Decide the boot-time posture for `/v1/embeddings` placeholder stability
+/// (WP 9.4) and act on it.
+///
+/// When `[pii.vault]` is absent, embeddings placeholders are per-request
+/// counters — inconsistent across requests, which breaks embedding-index/RAG
+/// consistency. Two cases:
+///
+/// - `pii.embeddings_require_vault = true` + no vault → a config contradiction:
+///   return [`EngineBuildError::Vault`] so boot fails loudly, consistent with
+///   the vault-open failure path in [`open_vault_store`].
+/// - no vault (flag unset) → emit one `tracing::warn!` and continue with
+///   per-request placeholders.
+///
+/// A configured vault is always fine. This is split out from
+/// [`ProxyState::build`] so the decision is unit-testable without standing up
+/// the full state.
+fn check_embeddings_vault_posture(config: &Config) -> Result<(), EngineBuildError> {
+    if config.pii.vault.is_some() {
+        return Ok(());
+    }
+    if config.pii.embeddings_require_vault {
+        return Err(EngineBuildError::Vault(
+            "pii.embeddings_require_vault is set but no [pii.vault] is configured: \
+             /v1/embeddings cannot guarantee stable placeholders without a persistent \
+             vault — configure [pii.vault] or unset pii.embeddings_require_vault"
+                .to_owned(),
+        ));
+    }
+    tracing::warn!(
+        "no [pii.vault] configured: /v1/embeddings will use per-request placeholders; \
+         cross-request vector consistency is not guaranteed. Configure [pii.vault] for \
+         stable placeholders, or set pii.embeddings_require_vault to reject embeddings \
+         requests instead of serving inconsistent placeholders."
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use drgtw_config::{PiiConfig, VaultConfig};
+
+    fn config_with_pii(vault: Option<VaultConfig>, require: bool) -> Config {
+        Config {
+            pii: PiiConfig {
+                vault,
+                embeddings_require_vault: require,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn dummy_vault() -> VaultConfig {
+        VaultConfig {
+            path: "vault.db".to_owned(),
+            key: "a".repeat(64),
+        }
+    }
+
+    #[test]
+    fn posture_ok_when_no_vault_and_flag_unset() {
+        let config = config_with_pii(None, false);
+        assert!(check_embeddings_vault_posture(&config).is_ok());
+    }
+
+    #[test]
+    fn posture_ok_when_vault_present_and_flag_set() {
+        let config = config_with_pii(Some(dummy_vault()), true);
+        assert!(check_embeddings_vault_posture(&config).is_ok());
+    }
+
+    #[test]
+    fn posture_fails_boot_when_required_but_no_vault() {
+        let config = config_with_pii(None, true);
+        match check_embeddings_vault_posture(&config) {
+            Err(EngineBuildError::Vault(msg)) => {
+                assert!(msg.contains("embeddings_require_vault"), "{msg}");
+                assert!(msg.contains("[pii.vault]"), "{msg}");
+            }
+            other => panic!("expected Vault error, got {other:?}"),
+        }
+    }
 }

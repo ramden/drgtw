@@ -224,6 +224,7 @@ mod tests {
             custom_recognizers: vec![],
             ner: None,
             vault: None,
+            embeddings_require_vault: false,
         }
     }
 
@@ -237,6 +238,7 @@ mod tests {
             }],
             ner: None,
             vault: None,
+            embeddings_require_vault: false,
         }
     }
 
@@ -381,6 +383,7 @@ mod tests {
             ],
             ner: None,
             vault: None,
+            embeddings_require_vault: false,
         };
         let engine = PiiEngine::from_config(&cfg).unwrap();
         let text = "say hello world!";
@@ -412,6 +415,7 @@ mod tests {
             ],
             ner: None,
             vault: None,
+            embeddings_require_vault: false,
         };
         let engine = PiiEngine::from_config(&cfg).unwrap();
         let text = "check TOKEN here";
