@@ -19,7 +19,7 @@ fn naive_restore(text: &str, pairs: &[(String, String)]) -> String {
     }
     // Sort longest-first for greedy match.
     let mut sorted = pairs.to_vec();
-    sorted.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+    sorted.sort_by_key(|pair| std::cmp::Reverse(pair.0.len()));
 
     let bytes = text.as_bytes();
     let len = bytes.len();
