@@ -234,6 +234,7 @@ fn build_config(mock_base_url: &str, pii_enabled: bool) -> Arc<Config> {
         tracing: Default::default(),
         model_aliases: Default::default(),
         otel: Default::default(),
+        ui: Default::default(),
     })
 }
 

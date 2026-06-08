@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use axum::routing::{get, post};
 use drgtw_config::Config;
-use drgtw_events::{EventSink, ModelCost};
+use drgtw_events::{EventSink, ModelCost, UsageEvent};
 use drgtw_keys::{BudgetTracker, KeyStore, RateLimiter};
 use drgtw_pii::{EntityStore, PiiEngine};
 
@@ -60,6 +60,11 @@ pub struct ProxyState {
     /// disabled path is a cheap branch. Spans flow through the global tracing
     /// subscriber layer, so they need no state here.
     pub metrics: Option<Arc<drgtw_otel::Metrics>>,
+    /// Live broadcast of every [`UsageEvent`] (capacity 1024). Always present.
+    /// Subscribers created via [`ProxyState::subscribe_usage`]. A send with no
+    /// receivers returns `Err` — that is normal and is always ignored; it is O(1)
+    /// with no allocation beyond the event itself.
+    pub usage_broadcast: tokio::sync::broadcast::Sender<UsageEvent>,
 }
 
 impl std::fmt::Debug for ProxyState {
@@ -105,6 +110,17 @@ impl ProxyState {
     /// draining every pending entry to disk.
     pub fn trace_handle(&self) -> Option<drgtw_trace::TraceWriter> {
         self.trace.clone()
+    }
+
+    /// Subscribe to the live usage-event broadcast.
+    ///
+    /// Each call returns an independent [`tokio::sync::broadcast::Receiver`]
+    /// that receives every [`UsageEvent`] emitted after the subscription is
+    /// created. Lagging receivers that fall behind the channel capacity (1024)
+    /// receive [`tokio::sync::broadcast::error::RecvError::Lagged`] — it is
+    /// the caller's responsibility to handle or discard lagged events.
+    pub fn subscribe_usage(&self) -> tokio::sync::broadcast::Receiver<UsageEvent> {
+        self.usage_broadcast.subscribe()
     }
 }
 

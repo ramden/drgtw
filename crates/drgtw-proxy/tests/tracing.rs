@@ -76,6 +76,7 @@ fn chat_config(mock_base_url: &str, tracing: TracingConfig) -> Arc<Config> {
         tracing,
         model_aliases: Default::default(),
         otel: Default::default(),
+        ui: Default::default(),
     })
 }
 
@@ -112,6 +113,7 @@ fn mcp_config(upstream_url: &str, dir: &std::path::Path) -> Arc<Config> {
         tracing: tracing_config(dir, true),
         model_aliases: Default::default(),
         otel: Default::default(),
+        ui: Default::default(),
     })
 }
 

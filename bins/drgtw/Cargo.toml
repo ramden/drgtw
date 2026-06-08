@@ -9,6 +9,8 @@ drgtw-config.workspace = true
 drgtw-otel.workspace = true
 drgtw-pii.workspace = true
 drgtw-proxy.workspace = true
+drgtw-ui.workspace = true
+drgtw-ui-auth.workspace = true
 
 axum.workspace = true
 clap.workspace = true
@@ -21,6 +23,7 @@ tracing-subscriber.workspace = true
 [dev-dependencies]
 drgtw-config.workspace = true
 drgtw-proxy.workspace = true
+drgtw-ui-auth.workspace = true
 axum.workspace = true
 bytes.workspace = true
 http-body-util = "0.1"

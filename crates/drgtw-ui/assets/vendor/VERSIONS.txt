@@ -1,0 +1,17 @@
+Vendored third-party assets for the embedded admin UI (concept).
+Served read-only under /ui/assets/. No build step — prebuilt files only.
+
+datastar.js              datastar v1.0.2
+  https://cdn.jsdelivr.net/gh/starfederation/datastar@v1.0.2/bundles/datastar.js
+basecoat.cdn.min.css     basecoat-css 0.3.11
+  https://cdn.jsdelivr.net/npm/basecoat-css@0.3.11/dist/basecoat.cdn.min.css
+basecoat-all.min.js      basecoat-css 0.3.11
+  https://cdn.jsdelivr.net/npm/basecoat-css@0.3.11/dist/js/all.min.js
+
+chart.umd.min.js         chart.js 4.5.1 (208522 bytes)
+  https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js
+
+fonts/Geist-Variable.woff2      geist 1.7.2 (69652 bytes) — Geist Sans variable
+  https://cdn.jsdelivr.net/npm/geist@1.7.2/dist/fonts/geist-sans/Geist-Variable.woff2
+fonts/GeistMono-Variable.woff2  geist 1.7.2 (71368 bytes) — Geist Mono variable
+  https://cdn.jsdelivr.net/npm/geist@1.7.2/dist/fonts/geist-mono/GeistMono-Variable.woff2

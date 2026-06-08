@@ -230,6 +230,7 @@ async fn test_alias_routes_and_forwards_resolved_model() {
         tracing: drgtw_config::TracingConfig { enabled: false, ..Default::default() },
         model_aliases: aliases,
         otel: Default::default(),
+        ui: Default::default(),
     });
 
     let app = test_router(config);
@@ -288,6 +289,7 @@ async fn test_alias_allowlist_applies_to_resolved_model() {
         tracing: drgtw_config::TracingConfig { enabled: false, ..Default::default() },
         model_aliases: aliases,
         otel: Default::default(),
+        ui: Default::default(),
     });
 
     let app = test_router(config);
@@ -329,6 +331,7 @@ async fn test_unaliased_model_untouched() {
         tracing: drgtw_config::TracingConfig { enabled: false, ..Default::default() },
         model_aliases: aliases,
         otel: Default::default(),
+        ui: Default::default(),
     });
 
     let app = test_router(config);
@@ -372,6 +375,7 @@ fn meta_config(upstream_uri: &str, sink_uri: &str) -> Arc<Config> {
         tracing: drgtw_config::TracingConfig { enabled: false, ..Default::default() },
         model_aliases: Default::default(),
         otel: Default::default(),
+        ui: Default::default(),
     })
 }
 

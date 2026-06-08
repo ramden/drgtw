@@ -99,6 +99,7 @@ fn openai_config(
         tracing: drgtw_config::TracingConfig { enabled: false, ..Default::default() },
         model_aliases: Default::default(),
         otel: Default::default(),
+        ui: Default::default(),
     })
 }
 

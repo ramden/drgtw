@@ -7,8 +7,12 @@
 # Secrets
 /.env
 
-# Model artifacts — large binaries, never committed
+# Model artifacts — large binaries, never committed (dir or symlink)
 /models/
+/models
+
+# Tailwind standalone CLI binary — vendored locally, not committed (~114M)
+crates/drgtw-ui/styles/tailwindcss
 
 # Live local config (use drgtw.toml.example as template)
 /drgtw.toml

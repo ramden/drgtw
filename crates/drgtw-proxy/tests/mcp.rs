@@ -127,6 +127,7 @@ fn base_config(mcp_servers: HashMap<String, McpServerConfig>) -> Arc<Config> {
         tracing: drgtw_config::TracingConfig { enabled: false, ..Default::default() },
         model_aliases: Default::default(),
         otel: Default::default(),
+        ui: Default::default(),
     })
 }
 

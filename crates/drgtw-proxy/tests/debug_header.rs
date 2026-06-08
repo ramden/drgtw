@@ -82,6 +82,7 @@ fn openai_pii_config(mock_base_url: &str, pii_enabled: bool) -> Arc<Config> {
         tracing: drgtw_config::TracingConfig { enabled: false, ..Default::default() },
         model_aliases: Default::default(),
         otel: Default::default(),
+        ui: Default::default(),
     })
 }
 

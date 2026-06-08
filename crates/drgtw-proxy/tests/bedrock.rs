@@ -242,6 +242,7 @@ async fn bedrock_openai_compat_routes_and_bills() {
         tracing: drgtw_config::TracingConfig { enabled: false, ..Default::default() },
         model_aliases: Default::default(),
         otel: Default::default(),
+        ui: Default::default(),
     });
 
     let app = test_router(config);
@@ -326,6 +327,7 @@ async fn bedrock_openai_compat_streams_sse() {
         tracing: drgtw_config::TracingConfig { enabled: false, ..Default::default() },
         model_aliases: Default::default(),
         otel: Default::default(),
+        ui: Default::default(),
     });
 
     let app = test_router(config);
@@ -391,6 +393,7 @@ async fn bedrock_cost_wildcard_key_matches() {
         tracing: drgtw_config::TracingConfig { enabled: false, ..Default::default() },
         model_aliases: Default::default(),
         otel: Default::default(),
+        ui: Default::default(),
     });
 
     let app = test_router(config);
@@ -464,6 +467,7 @@ async fn bedrock_invoke_non_streaming_routes_and_bills() {
         tracing: drgtw_config::TracingConfig { enabled: false, ..Default::default() },
         model_aliases: Default::default(),
         otel: Default::default(),
+        ui: Default::default(),
     });
 
     let app = test_router(config);
@@ -536,6 +540,7 @@ async fn bedrock_invoke_preserves_client_anthropic_version() {
         tracing: drgtw_config::TracingConfig { enabled: false, ..Default::default() },
         model_aliases: Default::default(),
         otel: Default::default(),
+        ui: Default::default(),
     });
 
     let app = test_router(config);
@@ -599,6 +604,7 @@ async fn bedrock_invoke_strips_model_into_path() {
         tracing: drgtw_config::TracingConfig { enabled: false, ..Default::default() },
         model_aliases: Default::default(),
         otel: Default::default(),
+        ui: Default::default(),
     });
 
     let app = test_router(config);
@@ -657,6 +663,7 @@ async fn bedrock_streaming_request_rejected_no_upstream_call() {
         tracing: drgtw_config::TracingConfig { enabled: false, ..Default::default() },
         model_aliases: Default::default(),
         otel: Default::default(),
+        ui: Default::default(),
     });
 
     let app = test_router(config);

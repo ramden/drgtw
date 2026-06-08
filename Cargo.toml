@@ -11,6 +11,9 @@ members = [
     "crates/drgtw-mcp",
     "crates/drgtw-vault",
     "crates/drgtw-otel",
+    "crates/drgtw-ui",
+    "crates/drgtw-history",
+    "crates/drgtw-ui-auth",
     "bins/drgtw",
     "bins/drgtw-bench",
 ]
@@ -31,6 +34,9 @@ drgtw-trace = { path = "crates/drgtw-trace" }
 drgtw-mcp = { path = "crates/drgtw-mcp" }
 drgtw-vault = { path = "crates/drgtw-vault" }
 drgtw-otel = { path = "crates/drgtw-otel" }
+drgtw-ui = { path = "crates/drgtw-ui" }
+drgtw-history = { path = "crates/drgtw-history" }
+drgtw-ui-auth = { path = "crates/drgtw-ui-auth" }
 
 axum = "0.8"
 bytes = "1"
@@ -63,6 +69,19 @@ hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
 anyhow = "1"
+
+# Admin UI: config round-trip editing, password hashing, signed-cookie sessions,
+# optional Postgres history/audit (feature-gated in drgtw-history).
+toml_edit = "0.22"
+argon2 = "0.5"
+base64 = "0.22"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "macros", "migrate"] }
+
+# Embedded admin UI (concept). maud templates, datastar SSE reactivity,
+# rust-embed for vendored Basecoat/Datastar assets served under /ui/assets/.
+maud = { version = "0.27", features = ["axum"] }
+datastar = { version = "0.3", features = ["axum"] }
+rust-embed = "8"
 
 # OpenTelemetry (0.0.2). Always compiled, runtime-gated via `[otel] enabled`.
 # Transport features: gRPC (grpc-tonic) + HTTP/protobuf (http-proto +

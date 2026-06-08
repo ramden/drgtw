@@ -65,6 +65,7 @@ fn tiny_max_body_config(mock_base_url: &str) -> Arc<Config> {
         tracing: drgtw_config::TracingConfig { enabled: false, ..Default::default() },
         model_aliases: Default::default(),
         otel: Default::default(),
+        ui: Default::default(),
     })
 }
 
@@ -109,6 +110,7 @@ fn test_config(mock_base_url: &str) -> Arc<Config> {
         tracing: drgtw_config::TracingConfig { enabled: false, ..Default::default() },
         model_aliases: Default::default(),
         otel: Default::default(),
+        ui: Default::default(),
     })
 }
 
@@ -296,6 +298,7 @@ async fn test_unknown_model_returns_404() {
         tracing: drgtw_config::TracingConfig { enabled: false, ..Default::default() },
         model_aliases: Default::default(),
         otel: Default::default(),
+        ui: Default::default(),
     });
     let app = test_router(config);
 
@@ -521,6 +524,7 @@ async fn test_upstream_connect_error_returns_502() {
         tracing: drgtw_config::TracingConfig { enabled: false, ..Default::default() },
         model_aliases: Default::default(),
         otel: Default::default(),
+        ui: Default::default(),
     });
 
     let app = test_router(config);
@@ -647,6 +651,7 @@ async fn test_body_within_limit_openai_proceeds() {
         tracing: drgtw_config::TracingConfig { enabled: false, ..Default::default() },
         model_aliases: Default::default(),
         otel: Default::default(),
+        ui: Default::default(),
     });
 
     let app = test_router(big_limit_config);

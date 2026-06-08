@@ -3,8 +3,12 @@
 //! Public API contract (Phase 0 / WP 0.2). The types below are the agreed
 //! cross-crate interface — extend, but do not break, without a lead decision.
 
+pub mod edit;
+pub use edit::{
+    read_document, restart_required_changes, set_value, validate_str, write_safe, FieldError,
+};
+
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::Path;
 
@@ -48,6 +52,11 @@ pub struct Config {
     /// to `[tracing]` (filesystem JSONL) which is unrelated and untouched.
     #[serde(default)]
     pub otel: OtelConfig,
+    /// Embedded admin web UI (concept). Off by default; mounted at `/ui` by the
+    /// binary only when `enabled`. Presence of `[ui.history]` unlocks the
+    /// history/audit nav — the concept opens no Postgres connection.
+    #[serde(default)]
+    pub ui: UiConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -227,6 +236,66 @@ pub struct VaultConfig {
     /// Master key. Supports `${ENV_VAR}` substitution (resolved at `load()`
     /// time). After resolution it must be exactly 64 hex characters (32 bytes).
     pub key: String,
+}
+
+/// Embedded admin UI configuration (concept).
+///
+/// The basic UI tier runs with zero persistence. The optional `[ui.history]`
+/// section unlocks the history/audit nav — its presence is the only signal the
+/// UI uses; the concept never opens a Postgres connection.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct UiConfig {
+    /// Mount the UI under `/ui`. Defaults to `false` — opt-in, like `[otel]`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Optional request-history backend. When present, the history/audit pages
+    /// appear unlocked; when absent they render a locked empty state.
+    #[serde(default)]
+    pub history: Option<UiHistoryConfig>,
+    /// Optional login/session auth for the admin UI.
+    ///
+    /// When absent, the UI is open (current behaviour). When present, all `/ui`
+    /// routes except `/ui/login` and `/ui/assets/*` require a valid session cookie.
+    #[serde(default)]
+    pub auth: Option<UiAuthConfig>,
+}
+
+/// Login + session-cookie auth for the admin UI.
+///
+/// Presence of this section enables authentication on every `/ui` route
+/// except the login page and static assets. All fields are required.
+///
+/// `session_key` is resolved from `${ENV_VAR}` at `load()` time; the literal
+/// `${ENV_VAR}` form is accepted by the UI-mode validator without resolving.
+#[derive(Debug, Clone, Deserialize)]
+pub struct UiAuthConfig {
+    /// Login username shown in the sidebar footer.
+    pub username: String,
+    /// Argon2id PHC string produced by `drgtw hash-password`. Must start with `$argon2`.
+    pub password_hash: String,
+    /// HMAC key used to sign session tokens and CSRF tokens.
+    /// Must be non-empty after env-var resolution. Supports `${ENV_VAR}`.
+    pub session_key: String,
+    /// Session lifetime in hours. Default 24.
+    #[serde(default = "default_session_ttl_hours")]
+    pub session_ttl_hours: u64,
+}
+
+fn default_session_ttl_hours() -> u64 {
+    24
+}
+
+/// Request-history backend for the UI (concept).
+///
+/// Required field: `postgres_url`. Follows the `VaultConfig` convention —
+/// `${ENV_VAR}` references resolve at `load()` time and the value must be
+/// non-empty after resolution. The concept does not connect to Postgres; the
+/// section's presence merely unlocks the history/audit nav.
+#[derive(Debug, Clone, Deserialize)]
+pub struct UiHistoryConfig {
+    /// PostgreSQL connection string. Supports `${ENV_VAR}` substitution
+    /// (resolved at `load()` time). Must be non-empty after resolution.
+    pub postgres_url: String,
 }
 
 impl Default for PiiConfig {
@@ -649,6 +718,17 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
         }
     }
 
+    // 3e. Env-var resolution on ui.history.postgres_url.
+    if let Some(history) = &mut config.ui.history {
+        history.postgres_url =
+            resolve_env_vars(&history.postgres_url, "ui.history.postgres_url")?;
+    }
+
+    // 3f. Env-var resolution on ui.auth.session_key.
+    if let Some(auth) = &mut config.ui.auth {
+        auth.session_key = resolve_env_vars(&auth.session_key, "ui.auth.session_key")?;
+    }
+
     // 4. Validate.
     validate(&config)?;
 
@@ -703,389 +783,11 @@ fn resolve_env_vars(value: &str, field: &str) -> Result<String, ConfigError> {
 }
 
 /// Validate the fully env-resolved config.
+///
+/// Delegates to [`edit::validate_inner`] with `ui_mode = false` so the full
+/// set of checks (including the 64-hex vault key rule) is enforced.
 fn validate(config: &Config) -> Result<(), ConfigError> {
-    // --- Server ---
-    if config.server.max_body_bytes == 0 {
-        return Err(ConfigError::Invalid(
-            "server.max_body_bytes must be > 0".to_owned(),
-        ));
-    }
-
-    // --- Connections ---
-    let mut conn_names: HashSet<&str> = HashSet::new();
-    for conn in &config.connections {
-        // Non-empty name.
-        if conn.name.is_empty() {
-            return Err(ConfigError::Invalid(
-                "connection name must not be empty".to_owned(),
-            ));
-        }
-        // Unique name.
-        if !conn_names.insert(conn.name.as_str()) {
-            return Err(ConfigError::Invalid(format!(
-                "duplicate connection name `{}`",
-                conn.name
-            )));
-        }
-        // Absolute http(s) URL, no query or fragment.
-        validate_base_url(&conn.base_url, &conn.name)?;
-
-        // SigV4 credential coupling (only meaningful for bedrock_converse, but
-        // the structural rules are validated whenever the fields are present).
-        let akid = conn.aws_access_key_id.as_deref().filter(|s| !s.is_empty());
-        let secret = conn
-            .aws_secret_access_key
-            .as_deref()
-            .filter(|s| !s.is_empty());
-        let token = conn.aws_session_token.as_deref().filter(|s| !s.is_empty());
-        let has_region = conn.region.as_deref().is_some_and(|s| !s.is_empty());
-        let has_sigv4 = akid.is_some() && secret.is_some();
-
-        // Partial SigV4 creds: exactly one of access-key / secret-key set.
-        if akid.is_some() != secret.is_some() {
-            return Err(ConfigError::Invalid(format!(
-                "connections[{}]: aws_access_key_id and aws_secret_access_key must be set together",
-                conn.name
-            )));
-        }
-        // Session token without the key pair.
-        if token.is_some() && !has_sigv4 {
-            return Err(ConfigError::Invalid(format!(
-                "connections[{}]: aws_session_token requires aws_access_key_id and aws_secret_access_key",
-                conn.name
-            )));
-        }
-        // Region required when SigV4 creds are present.
-        if has_sigv4 && !has_region {
-            return Err(ConfigError::Invalid(format!(
-                "connections[{}]: region is required for SigV4 Bedrock signing",
-                conn.name
-            )));
-        }
-
-        if conn.format == ApiFormat::BedrockConverse {
-            // A bedrock_converse connection authenticates with EITHER SigV4
-            // creds OR a non-empty bearer api_key.
-            if !has_sigv4 && conn.api_key.is_empty() {
-                return Err(ConfigError::Invalid(format!(
-                    "connections[{}]: bedrock_converse requires either aws_access_key_id+aws_secret_access_key or api_key",
-                    conn.name
-                )));
-            }
-        } else if conn.api_key.is_empty() {
-            // Every other format keeps the universal non-empty api_key rule.
-            return Err(ConfigError::Invalid(format!(
-                "connections[{}].api_key must not be empty",
-                conn.name
-            )));
-        }
-
-        // Models: valid patterns, no duplicates within a connection.
-        let mut model_names: HashSet<&str> = HashSet::new();
-        for model in &conn.models {
-            let ctx = format!("connections[{}].models", conn.name);
-            validate_model_pattern(model, &ctx)?;
-            if !model_names.insert(model.as_str()) {
-                return Err(ConfigError::Invalid(format!(
-                    "connections[{}].models contains duplicate `{}`",
-                    conn.name, model
-                )));
-            }
-        }
-
-        // model_costs: keys are valid patterns; values are finite and >= 0.
-        for (key, cost) in &conn.model_costs {
-            let ctx = format!("connections[{}].model_costs", conn.name);
-            if key.is_empty() {
-                return Err(ConfigError::Invalid(format!(
-                    "{ctx}: model cost key must not be empty"
-                )));
-            }
-            validate_model_pattern(key, &ctx)?;
-            if !cost.input_per_1m.is_finite() || cost.input_per_1m < 0.0 {
-                return Err(ConfigError::Invalid(format!(
-                    "{ctx}[\"{key}\"].input_per_1m must be a finite value >= 0"
-                )));
-            }
-            if !cost.output_per_1m.is_finite() || cost.output_per_1m < 0.0 {
-                return Err(ConfigError::Invalid(format!(
-                    "{ctx}[\"{key}\"].output_per_1m must be a finite value >= 0"
-                )));
-            }
-        }
-    }
-
-    // --- Virtual keys ---
-    let mut vk_keys: HashSet<&str> = HashSet::new();
-    for vk in &config.virtual_keys {
-        // Must start with prefix and be longer than just the prefix.
-        if !vk.key.starts_with(VIRTUAL_KEY_PREFIX) || vk.key.len() <= VIRTUAL_KEY_PREFIX.len() {
-            return Err(ConfigError::Invalid(format!(
-                "virtual key `{}` must start with `{}` and have additional characters",
-                vk.key, VIRTUAL_KEY_PREFIX
-            )));
-        }
-        // Unique.
-        if !vk_keys.insert(vk.key.as_str()) {
-            return Err(ConfigError::Invalid(format!(
-                "duplicate virtual key `{}`",
-                vk.key
-            )));
-        }
-        // connections list non-empty.
-        if vk.connections.is_empty() {
-            return Err(ConfigError::Invalid(format!(
-                "virtual key `{}` has an empty connections list",
-                vk.key
-            )));
-        }
-        // Every named connection resolves.
-        for conn_name in &vk.connections {
-            if !conn_names.contains(conn_name.as_str()) {
-                return Err(ConfigError::Invalid(format!(
-                    "virtual key `{}` references unknown connection `{}`",
-                    vk.key, conn_name
-                )));
-            }
-        }
-        // If models allowlist present, must be non-empty, valid patterns.
-        if let Some(models) = &vk.models {
-            if models.is_empty() {
-                return Err(ConfigError::Invalid(format!(
-                    "virtual key `{}` has an empty models allowlist; omit the field to allow all",
-                    vk.key
-                )));
-            }
-            let ctx = format!("virtual key `{}`  models allowlist", vk.key);
-            for pattern in models {
-                validate_model_pattern(pattern, &ctx)?;
-            }
-        }
-
-        // Rate limit: if present, both fields must be > 0.
-        if let Some(rl) = &vk.rate_limit {
-            if rl.requests == 0 {
-                return Err(ConfigError::Invalid(format!(
-                    "virtual key `{}` rate_limit.requests must be > 0",
-                    vk.key
-                )));
-            }
-            if rl.per_seconds == 0 {
-                return Err(ConfigError::Invalid(format!(
-                    "virtual key `{}` rate_limit.per_seconds must be > 0",
-                    vk.key
-                )));
-            }
-        }
-
-        // Budget: if present, max_usd must be finite and > 0; per_seconds must be > 0.
-        if let Some(budget) = &vk.budget {
-            if !budget.max_usd.is_finite() || budget.max_usd <= 0.0 {
-                return Err(ConfigError::Invalid(format!(
-                    "virtual key `{}` budget.max_usd must be a finite value > 0",
-                    vk.key
-                )));
-            }
-            if budget.per_seconds == 0 {
-                return Err(ConfigError::Invalid(format!(
-                    "virtual key `{}` budget.per_seconds must be > 0",
-                    vk.key
-                )));
-            }
-        }
-    }
-
-    // --- PII custom recognizers ---
-    let mut rec_names: HashSet<&str> = HashSet::new();
-    for rec in &config.pii.custom_recognizers {
-        if rec.name.is_empty()
-            || !rec
-                .name
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_')
-        {
-            return Err(ConfigError::Invalid(format!(
-                "pii.custom_recognizers name `{}` must be non-empty ascii alphanumeric/underscore",
-                rec.name
-            )));
-        }
-        if !rec_names.insert(rec.name.as_str()) {
-            return Err(ConfigError::Invalid(format!(
-                "duplicate pii.custom_recognizers name `{}`",
-                rec.name
-            )));
-        }
-        if rec.pattern.is_empty() {
-            return Err(ConfigError::Invalid(format!(
-                "pii.custom_recognizers `{}` has an empty pattern",
-                rec.name
-            )));
-        }
-    }
-
-    // --- PII NER ---
-    if let Some(ner) = &config.pii.ner {
-        if ner.model_dir.is_empty() {
-            return Err(ConfigError::Invalid(
-                "pii.ner.model_dir must not be empty".to_owned(),
-            ));
-        }
-        if !(0.0..=1.0).contains(&ner.score_threshold) {
-            return Err(ConfigError::Invalid(format!(
-                "pii.ner.score_threshold `{}` must be in the range 0.0..=1.0",
-                ner.score_threshold
-            )));
-        }
-        if ner.timeout_ms == 0 {
-            return Err(ConfigError::Invalid(
-                "pii.ner.timeout_ms must be > 0".to_owned(),
-            ));
-        }
-        if ner.workers == 0 {
-            return Err(ConfigError::Invalid(
-                "pii.ner.workers must be > 0".to_owned(),
-            ));
-        }
-        if ner.queue_capacity == 0 {
-            return Err(ConfigError::Invalid(
-                "pii.ner.queue_capacity must be > 0".to_owned(),
-            ));
-        }
-    }
-
-    // --- PII vault (WP 9.1) ---
-    if let Some(vault) = &config.pii.vault {
-        if vault.path.is_empty() {
-            return Err(ConfigError::Invalid(
-                "pii.vault.path must not be empty".to_owned(),
-            ));
-        }
-        // Key must be exactly 64 hex characters (32 bytes) after env resolution.
-        // NEVER echo the key material in the error message.
-        let key_ok = vault.key.len() == 64 && vault.key.chars().all(|c| c.is_ascii_hexdigit());
-        if !key_ok {
-            return Err(ConfigError::Invalid(
-                "pii.vault.key must be 64 hex characters".to_owned(),
-            ));
-        }
-    }
-
-    // --- Events ---
-    if let Some(events) = &config.events {
-        validate_absolute_http_url(&events.url, "events.url")?;
-        if events.buffer_size == 0 {
-            return Err(ConfigError::Invalid(
-                "events.buffer_size must be > 0".to_owned(),
-            ));
-        }
-        if events.timeout_ms == 0 {
-            return Err(ConfigError::Invalid(
-                "events.timeout_ms must be > 0".to_owned(),
-            ));
-        }
-    }
-
-    // --- MCP servers (WP-A) ---
-    for (name, server) in &config.mcp_servers {
-        // Server name (map key): non-empty, ascii alphanumeric / `_` / `-`.
-        if name.is_empty()
-            || !name
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-        {
-            return Err(ConfigError::Invalid(format!(
-                "mcp_servers name `{name}` must be non-empty ascii alphanumeric, `_`, or `-`"
-            )));
-        }
-
-        // url: absolute http(s), no query/fragment.
-        validate_absolute_http_url(&server.url, &format!("mcp_servers[{name}].url"))?;
-
-        // auth_type / auth_value coupling.
-        match server.auth_type {
-            McpAuthType::None => {
-                if server.auth_value.is_some() {
-                    return Err(ConfigError::Invalid(format!(
-                        "mcp_servers[{name}].auth_value must be absent when auth_type is none"
-                    )));
-                }
-            }
-            _ => {
-                let ok = server
-                    .auth_value
-                    .as_deref()
-                    .map(|v| !v.is_empty())
-                    .unwrap_or(false);
-                if !ok {
-                    return Err(ConfigError::Invalid(format!(
-                        "mcp_servers[{name}].auth_value must be present and non-empty when auth_type is not none"
-                    )));
-                }
-            }
-        }
-
-        // extra_headers: keys non-empty, valid HTTP header name chars.
-        for header in server.extra_headers.keys() {
-            if header.is_empty()
-                || !header
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '-')
-            {
-                return Err(ConfigError::Invalid(format!(
-                    "mcp_servers[{name}].extra_headers header name `{header}` must be non-empty ascii alphanumeric or `-`"
-                )));
-            }
-        }
-
-        // Header values flow into HTTP requests: reject control chars (\r, \n,
-        // \0) to prevent header injection. Never echo the value (may be secret).
-        if let Some(auth_value) = &server.auth_value
-            && auth_value.chars().any(|c| c.is_ascii_control())
-        {
-            return Err(ConfigError::Invalid(format!(
-                "mcp_servers[{name}].auth_value must not contain control characters"
-            )));
-        }
-        for (header, value) in &server.extra_headers {
-            if value.chars().any(|c| c.is_ascii_control()) {
-                return Err(ConfigError::Invalid(format!(
-                    "mcp_servers[{name}].extra_headers[{header}] must not contain control characters"
-                )));
-            }
-        }
-    }
-
-    // --- OTel ---
-    // Only validate when enabled: a disabled section may carry placeholder
-    // defaults and must never fail boot.
-    if config.otel.enabled {
-        if config.otel.endpoint.is_empty() {
-            return Err(ConfigError::Invalid(
-                "otel.endpoint must not be empty when otel.enabled is true".to_owned(),
-            ));
-        }
-        // Endpoint must be a valid absolute http(s) URL. (No query/fragment —
-        // OTLP endpoints are bare host:port roots.)
-        validate_absolute_http_url(&config.otel.endpoint, "otel.endpoint")?;
-        if !(0.0..=1.0).contains(&config.otel.sample_ratio) {
-            return Err(ConfigError::Invalid(format!(
-                "otel.sample_ratio must be in 0.0..=1.0, got {}",
-                config.otel.sample_ratio
-            )));
-        }
-        if config.otel.export_interval_ms == 0 {
-            return Err(ConfigError::Invalid(
-                "otel.export_interval_ms must be > 0".to_owned(),
-            ));
-        }
-        if config.otel.export_timeout_ms == 0 {
-            return Err(ConfigError::Invalid(
-                "otel.export_timeout_ms must be > 0".to_owned(),
-            ));
-        }
-    }
-
-    Ok(())
+    edit::validate_inner(config, false)
 }
 
 /// Validate a single model pattern entry.
@@ -1094,6 +796,7 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
 /// - Must not be empty.
 /// - `*` is only allowed as the **last** character.
 /// - At most one `*` in the entire string.
+#[allow(dead_code)]
 fn validate_model_pattern(pattern: &str, context: &str) -> Result<(), ConfigError> {
     if pattern.is_empty() {
         return Err(ConfigError::Invalid(format!(
@@ -1115,6 +818,7 @@ fn validate_model_pattern(pattern: &str, context: &str) -> Result<(), ConfigErro
 }
 
 /// Check that a base_url is an absolute http(s) URL with no query or fragment.
+#[allow(dead_code)]
 fn validate_base_url(url_str: &str, conn_name: &str) -> Result<(), ConfigError> {
     let field = format!("connections[{}].base_url", conn_name);
     validate_absolute_http_url(url_str, &field)
@@ -1122,6 +826,7 @@ fn validate_base_url(url_str: &str, conn_name: &str) -> Result<(), ConfigError> 
 
 /// Check that a URL string is an absolute http(s) URL with no query or fragment.
 /// `field` is used in error messages (e.g. `"events.url"`).
+#[allow(dead_code)]
 fn validate_absolute_http_url(url_str: &str, field: &str) -> Result<(), ConfigError> {
     let url = Url::parse(url_str)
         .map_err(|_| ConfigError::Invalid(format!("{field} `{url_str}` is not a valid URL",)))?;
@@ -2793,6 +2498,79 @@ key = "${DRGTW_TEST_VAULT_MISSING_XYZ}"
         let toml = format!("[pii.vault]\npath = \"vault.db\"\nkey = \"{key}\"\n");
         let cfg = load_toml(&toml).expect("uppercase hex is valid");
         assert_eq!(cfg.pii.vault.as_ref().unwrap().key, key);
+    }
+
+    // -----------------------------------------------------------------------
+    // UI (concept)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_ui_defaults_disabled_no_history() {
+        let cfg = load_toml("").expect("empty config");
+        assert!(!cfg.ui.enabled, "ui disabled by default");
+        assert!(cfg.ui.history.is_none(), "ui.history absent by default");
+    }
+
+    #[test]
+    fn test_ui_enabled_without_history() {
+        let toml = "[ui]\nenabled = true\n";
+        let cfg = load_toml(toml).expect("valid ui config");
+        assert!(cfg.ui.enabled);
+        assert!(cfg.ui.history.is_none());
+    }
+
+    #[test]
+    fn test_ui_history_present_unlocks() {
+        let toml = "[ui]\nenabled = true\n\n[ui.history]\npostgres_url = \"postgres://localhost/drgtw\"\n";
+        let cfg = load_toml(toml).expect("valid ui history config");
+        let history = cfg.ui.history.as_ref().expect("history present");
+        assert_eq!(history.postgres_url, "postgres://localhost/drgtw");
+    }
+
+    #[test]
+    fn test_ui_history_postgres_url_env_var_resolved() {
+        let url = "postgres://user:pw@db.example.com:5432/drgtw";
+        unsafe {
+            std::env::set_var("DRGTW_TEST_UI_PG_OK", url);
+        }
+        let toml = r#"
+[ui.history]
+postgres_url = "${DRGTW_TEST_UI_PG_OK}"
+"#;
+        let cfg = load_toml(toml).expect("env-resolved postgres_url");
+        assert_eq!(cfg.ui.history.as_ref().unwrap().postgres_url, url);
+        unsafe {
+            std::env::remove_var("DRGTW_TEST_UI_PG_OK");
+        }
+    }
+
+    #[test]
+    fn test_ui_history_postgres_url_missing_env_var_rejected() {
+        unsafe {
+            std::env::remove_var("DRGTW_TEST_UI_PG_MISSING");
+        }
+        let toml = r#"
+[ui.history]
+postgres_url = "${DRGTW_TEST_UI_PG_MISSING}"
+"#;
+        let err = load_toml(toml).expect_err("missing env var rejected");
+        match err {
+            ConfigError::MissingEnvVar { var, field } => {
+                assert_eq!(var, "DRGTW_TEST_UI_PG_MISSING");
+                assert_eq!(field, "ui.history.postgres_url");
+            }
+            other => panic!("unexpected: {other}"),
+        }
+    }
+
+    #[test]
+    fn test_ui_history_postgres_url_empty_rejected() {
+        let toml = "[ui.history]\npostgres_url = \"\"\n";
+        let err = load_toml(toml).expect_err("empty postgres_url rejected");
+        match err {
+            ConfigError::Invalid(msg) => assert!(msg.contains("ui.history.postgres_url"), "{msg}"),
+            other => panic!("unexpected: {other}"),
+        }
     }
 
     #[test]

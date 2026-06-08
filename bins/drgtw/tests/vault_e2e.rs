@@ -59,7 +59,7 @@ fn test_validate_config_opens_vault_ok() {
     let cfg = load_vault_config(&dir, &vault_path.to_string_lossy(), VAULT_KEY);
 
     // server::router == the fallible part of --validate-config.
-    let result = drgtw::server::router(cfg, dir.path());
+    let result = drgtw::server::router(cfg, dir.path(), std::path::PathBuf::new());
     assert!(result.is_ok(), "valid vault config must build the router");
     assert!(vault_path.exists(), "vault file must be created on open");
 }
@@ -73,12 +73,12 @@ fn test_validate_config_wrong_key_fails() {
 
     // Create the vault with the correct key first.
     let cfg_ok = load_vault_config(&dir, &vault_path.to_string_lossy(), VAULT_KEY);
-    let _ = drgtw::server::router(cfg_ok, dir.path()).expect("first build creates vault");
+    let _ = drgtw::server::router(cfg_ok, dir.path(), std::path::PathBuf::new()).expect("first build creates vault");
 
     // Now a config with a different valid-hex key must fail to build.
     let wrong = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
     let cfg_bad = load_vault_config(&dir, &vault_path.to_string_lossy(), wrong);
-    let err = drgtw::server::router(cfg_bad, dir.path()).expect_err("wrong key must fail");
+    let err = drgtw::server::router(cfg_bad, dir.path(), std::path::PathBuf::new()).expect_err("wrong key must fail");
     let msg = err.to_string();
     assert!(msg.to_lowercase().contains("vault"), "error mentions vault: {msg}");
     // Key material must never leak.
@@ -92,7 +92,7 @@ fn test_validate_config_missing_parent_dir_fails() {
     let bogus = dir.path().join("nope").join("vault.db");
     let cfg = load_vault_config(&dir, &bogus.to_string_lossy(), VAULT_KEY);
 
-    let err = drgtw::server::router(cfg, dir.path()).expect_err("missing parent dir must fail");
+    let err = drgtw::server::router(cfg, dir.path(), std::path::PathBuf::new()).expect_err("missing parent dir must fail");
     let msg = err.to_string();
     assert!(msg.to_lowercase().contains("vault"), "error mentions vault: {msg}");
 }

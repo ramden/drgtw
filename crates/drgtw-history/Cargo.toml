@@ -1,0 +1,25 @@
+[package]
+name = "drgtw-history"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Postgres-backed history/audit layer for the admin UI. Entirely OPTIONAL:
+# with the `postgres` feature OFF, this crate compiles to no-op stubs and the
+# gateway runs with zero DB dependency. The core (binary + TOML config) never
+# depends on a database — this only stores usage history, audit log, sessions.
+[features]
+default = []
+postgres = ["dep:sqlx"]
+
+[dependencies]
+drgtw-events.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+sqlx = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

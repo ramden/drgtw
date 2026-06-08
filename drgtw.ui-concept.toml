@@ -1,0 +1,59 @@
+# Minimal self-contained config for trying the /ui concept.
+# Dummy literal keys — no env vars, no real upstreams needed (UI never calls them).
+
+[server]
+bind_addr = "127.0.0.1:8080"
+
+[[connections]]
+name = "openai-main"
+base_url = "https://api.openai.com"
+api_key = "sk-dummy-not-a-real-key"
+format = "open_ai"
+models = ["gpt-4o", "gpt-4o-mini"]
+
+[[connections]]
+name = "anthropic-main"
+base_url = "https://api.anthropic.com"
+api_key = "sk-dummy-not-a-real-key"
+format = "anthropic"
+models = ["claude-opus-4-5", "claude-sonnet-4-5"]
+
+[[virtual_keys]]
+key = "sk-drgtw-all-models-example-key-001"
+connections = ["openai-main", "anthropic-main"]
+
+[[virtual_keys]]
+key = "sk-drgtw-restricted-example-key-002"
+connections = ["openai-main"]
+models = ["gpt-4o-mini"]
+
+# Aggregated upstream MCP servers (dummy — UI never calls them).
+[mcp_servers.docs]
+url = "https://mcp.example.com/docs"
+description = "Internal documentation tools"
+auth_type = "bearer"
+auth_value = "mcp-dummy-not-a-real-token"
+
+[mcp_servers.search]
+url = "https://mcp.example.com/search"
+auth_type = "none"
+
+# --- the UI ---
+[ui]
+enabled = true
+
+# Uncomment to flip history/audit nav from greyed/locked to unlocked
+# (no Postgres connection is opened — presence of the section only):
+# [ui.history]
+# postgres_url = "${DATABASE_URL}"
+
+# Uncomment to enable login/session auth on the admin UI.
+# Generate password_hash with: drgtw hash-password --password <your-password>
+# Generate a session key with: openssl rand -hex 32
+# Set UI_SESSION_KEY in the environment before starting the gateway.
+#
+# [ui.auth]
+# username = "admin"
+# password_hash = "$argon2id$v=19$m=19456,t=2,p=1$..."   # output of: drgtw hash-password
+# session_key = "${UI_SESSION_KEY}"                        # >=32 bytes; resolved from env
+# session_ttl_hours = 24                                   # optional, default 24

@@ -1151,8 +1151,7 @@ fn emit_event(
     }
     otel_enrich::record_metrics(&ctx.state, &telemetry, ctx.pii_entities);
 
-    let Some(sink) = &ctx.state.events else { return };
-    sink.emit(UsageEvent {
+    let ev = UsageEvent {
         request_id: ctx.request_id.clone(),
         key_id: ctx.key_id.clone(),
         endpoint: ctx.spec.name.to_owned(),
@@ -1168,7 +1167,11 @@ fn emit_event(
         fallback_attempts: ctx.fallback_attempts,
         ts_unix_ms: now_unix_ms(),
         metadata: ctx.metadata.clone(),
-    });
+    };
+    let _ = ctx.state.usage_broadcast.send(ev.clone());
+    if let Some(sink) = &ctx.state.events {
+        sink.emit(ev);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1800,8 +1803,8 @@ async fn embeddings_inner(
         otel_enrich::enrich_span(&telemetry);
         otel_enrich::record_metrics(&state, &telemetry, 0);
 
-        if let Some(sink) = &state.events {
-            sink.emit(UsageEvent {
+        {
+            let ev = UsageEvent {
                 request_id: request_id.clone(),
                 key_id: key_id.clone(),
                 endpoint: "embeddings".to_owned(),
@@ -1817,7 +1820,11 @@ async fn embeddings_inner(
                 fallback_attempts,
                 ts_unix_ms: now_unix_ms(),
                 metadata: metadata.clone(),
-            });
+            };
+            let _ = state.usage_broadcast.send(ev.clone());
+            if let Some(sink) = &state.events {
+                sink.emit(ev);
+            }
         }
 
         let mut resp = build_response(upstream_status, content_type, Body::from(resp_bytes));

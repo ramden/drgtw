@@ -1,0 +1,17 @@
+/* drgtw-ui stylesheet source.
+ *
+ * Build (no Node — standalone Tailwind v4 CLI):
+ *   ./tailwindcss -i styles/input.css -o assets/vendor/app.css --minify
+ * run from crates/drgtw-ui/. The CLI scans the @source templates below and
+ * emits only the utilities they actually use, plus the Basecoat component
+ * layer and shadcn theme tokens.
+ */
+@import "tailwindcss";
+@import "./basecoat.css";
+/* drgtw console design system: CSS vars, @font-face (vendored Geist),
+ * glass utilities, keyframes. Pulled in so the CLI emits it into app.css. */
+@import "./theme.css";
+
+/* Maud templates carry class names as Rust string literals; point the scanner
+ * at them so layout utilities (flex/grid/gap/…) get generated. */
+@source "../src";

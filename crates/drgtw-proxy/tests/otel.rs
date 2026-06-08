@@ -69,6 +69,7 @@ fn chat_config(mock_base_url: &str) -> Arc<Config> {
         tracing: Default::default(),
         model_aliases: Default::default(),
         otel: Default::default(),
+        ui: Default::default(),
     })
 }
 

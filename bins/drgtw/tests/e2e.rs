@@ -154,7 +154,7 @@ fn chat_request(virtual_key: &str, json_body: &str) -> Request<Body> {
 async fn test_health_route() {
     // health doesn't need an upstream — pass a placeholder URL
     let cfg = load_test_config("http://127.0.0.1:1");
-    let app = drgtw::server::router(cfg, std::path::Path::new(".")).expect("router build failed");
+    let app = drgtw::server::router(cfg, std::path::Path::new("."), std::path::PathBuf::new()).expect("router build failed");
 
     let req = Request::builder()
         .method("GET")
@@ -178,7 +178,7 @@ async fn test_health_route() {
 #[tokio::test]
 async fn test_request_id_on_health() {
     let cfg = load_test_config("http://127.0.0.1:1");
-    let app = drgtw::server::router(cfg, std::path::Path::new(".")).expect("router build failed");
+    let app = drgtw::server::router(cfg, std::path::Path::new("."), std::path::PathBuf::new()).expect("router build failed");
 
     let req = Request::builder()
         .method("GET")
@@ -224,7 +224,7 @@ async fn test_request_ids_are_distinct() {
         .unwrap();
 
     // Clone the app for two separate oneshot calls.
-    let id_a = drgtw::server::router(Arc::clone(&cfg), std::path::Path::new("."))
+    let id_a = drgtw::server::router(Arc::clone(&cfg), std::path::Path::new("."), std::path::PathBuf::new())
         .expect("router build failed")
         .oneshot(req_a)
         .await
@@ -236,7 +236,7 @@ async fn test_request_ids_are_distinct() {
         .unwrap()
         .to_owned();
 
-    let id_b = drgtw::server::router(Arc::clone(&cfg), std::path::Path::new("."))
+    let id_b = drgtw::server::router(Arc::clone(&cfg), std::path::Path::new("."), std::path::PathBuf::new())
         .expect("router build failed")
         .oneshot(req_b)
         .await
@@ -279,7 +279,7 @@ async fn test_chat_completions_round_trip() {
         .await;
 
     let cfg = load_test_config(&mock_server.uri());
-    let app = drgtw::server::router(cfg, std::path::Path::new(".")).expect("router build failed");
+    let app = drgtw::server::router(cfg, std::path::Path::new("."), std::path::PathBuf::new()).expect("router build failed");
 
     let req = chat_request(
         "sk-drgtw-e2etest01",
@@ -310,7 +310,7 @@ async fn test_chat_completions_round_trip() {
 async fn test_invalid_virtual_key_returns_401() {
     let mock_server = MockServer::start().await;
     let cfg = load_test_config(&mock_server.uri());
-    let app = drgtw::server::router(cfg, std::path::Path::new(".")).expect("router build failed");
+    let app = drgtw::server::router(cfg, std::path::Path::new("."), std::path::PathBuf::new()).expect("router build failed");
 
     let req = chat_request(
         "sk-drgtw-doesnotexist",
@@ -332,7 +332,7 @@ async fn test_invalid_virtual_key_returns_401() {
 async fn test_request_id_present_on_error_response() {
     let mock_server = MockServer::start().await;
     let cfg = load_test_config(&mock_server.uri());
-    let app = drgtw::server::router(cfg, std::path::Path::new(".")).expect("router build failed");
+    let app = drgtw::server::router(cfg, std::path::Path::new("."), std::path::PathBuf::new()).expect("router build failed");
 
     // No auth header → 401
     let req = Request::builder()
@@ -375,7 +375,7 @@ async fn test_e2e_pii_custom_recognizer_full_flow() {
         .await;
 
     let cfg = load_pii_custom_config(&mock_server.uri(), "ticket", r"TKT-\d+");
-    let app = drgtw::server::router(cfg, std::path::Path::new(".")).expect("router build failed");
+    let app = drgtw::server::router(cfg, std::path::Path::new("."), std::path::PathBuf::new()).expect("router build failed");
 
     let req_body =
         r#"{"model":"gpt-4o","messages":[{"role":"user","content":"handle TKT-9999 now"}]}"#;
@@ -427,7 +427,7 @@ async fn test_e2e_pii_custom_recognizer_full_flow() {
 fn test_invalid_custom_regex_fails_boot() {
     let cfg = load_invalid_regex_config();
     // ProxyState::new (via server::router) must fail with a readable error.
-    let result = drgtw::server::router(cfg, std::path::Path::new("."));
+    let result = drgtw::server::router(cfg, std::path::Path::new("."), std::path::PathBuf::new());
     assert!(
         result.is_err(),
         "router must fail to build with invalid custom regex"

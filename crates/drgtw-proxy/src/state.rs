@@ -141,6 +141,8 @@ impl ProxyState {
             None
         };
 
+        let (usage_broadcast, _) = tokio::sync::broadcast::channel(1024);
+
         Ok(Self {
             keys,
             client,
@@ -154,6 +156,7 @@ impl ProxyState {
             mcp,
             trace,
             metrics: None,
+            usage_broadcast,
         })
     }
 }

@@ -1487,6 +1487,7 @@ mod tests {
             tracing: Default::default(),
             model_aliases: Default::default(),
             otel: Default::default(),
+            ui: Default::default(),
         }
     }
 
@@ -1567,6 +1568,7 @@ mod tests {
             tracing: Default::default(),
             model_aliases: Default::default(),
             otel: Default::default(),
+            ui: Default::default(),
         };
         let rk = get_rk(&cfg, "sk-drgtw-restrict");
         let err = rk.connections_for_model("claude-3-5-sonnet").unwrap_err();
@@ -1602,6 +1604,7 @@ mod tests {
             tracing: Default::default(),
             model_aliases: Default::default(),
             otel: Default::default(),
+            ui: Default::default(),
         };
         let rk = get_rk(&cfg, "sk-drgtw-tie");
         let conns = rk.connections_for_model("gpt-4o").unwrap();
@@ -1634,6 +1637,7 @@ mod tests {
             tracing: Default::default(),
             model_aliases: Default::default(),
             otel: Default::default(),
+            ui: Default::default(),
         }
     }
 
@@ -1651,6 +1655,7 @@ mod tests {
             tracing: Default::default(),
             model_aliases: Default::default(),
             otel: Default::default(),
+            ui: Default::default(),
         };
         let bt = BudgetTracker::new(&cfg);
         assert_eq!(bt.check("vk-0"), BudgetDecision::Unlimited);
@@ -1775,6 +1780,7 @@ mod tests {
             tracing: Default::default(),
             model_aliases: Default::default(),
             otel: Default::default(),
+            ui: Default::default(),
         };
         let bt = BudgetTracker::new(&cfg);
 
