@@ -551,7 +551,7 @@ fn edit_key_form(
                         label class="block text-xs font-medium text-muted-foreground mb-1" { "MCP servers (blank = all)" }
                         div class="flex flex-wrap gap-2" {
                             @for (name, _) in &cfg.mcp_servers {
-                                @let checked = vk.mcp_servers.as_ref().map_or(false, |m| m.contains(name));
+                                @let checked = vk.mcp_servers.as_ref().is_some_and(|m| m.contains(name));
                                 label class="flex items-center gap-1.5 text-xs cursor-pointer" {
                                     input type="checkbox" name="mcp_server" value=(name)
                                         checked[checked] class="rounded";

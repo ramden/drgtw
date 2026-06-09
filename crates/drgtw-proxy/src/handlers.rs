@@ -1191,28 +1191,28 @@ fn emit_event(
     }
     // Fire-and-forget PII detection counts. One row per entity kind per request.
     // Guarded on pii_flag so the hot path (PII off) is a single branch.
-    if ctx.pii_flag {
-        if let Some(history) = &ctx.state.history {
-            let kind_counts = pii_kind_counts(&ctx.pii_map);
-            if !kind_counts.is_empty() {
-                let history = Arc::clone(history);
-                let request_id = ctx.request_id.clone();
-                let key_id = ctx.key_id.clone();
-                let ts = now_unix_ms() as i64;
-                tokio::spawn(async move {
-                    let rows: Vec<drgtw_history::PiiDetectionRow> = kind_counts
-                        .into_iter()
-                        .map(|(entity_kind, count)| drgtw_history::PiiDetectionRow {
-                            request_id: request_id.clone(),
-                            key_id: key_id.clone(),
-                            entity_kind,
-                            count,
-                            ts_unix_ms: ts,
-                        })
-                        .collect();
-                    let _ = history.record_pii_detections(&rows).await;
-                });
-            }
+    if ctx.pii_flag
+        && let Some(history) = &ctx.state.history
+    {
+        let kind_counts = pii_kind_counts(&ctx.pii_map);
+        if !kind_counts.is_empty() {
+            let history = Arc::clone(history);
+            let request_id = ctx.request_id.clone();
+            let key_id = ctx.key_id.clone();
+            let ts = now_unix_ms() as i64;
+            tokio::spawn(async move {
+                let rows: Vec<drgtw_history::PiiDetectionRow> = kind_counts
+                    .into_iter()
+                    .map(|(entity_kind, count)| drgtw_history::PiiDetectionRow {
+                        request_id: request_id.clone(),
+                        key_id: key_id.clone(),
+                        entity_kind,
+                        count,
+                        ts_unix_ms: ts,
+                    })
+                    .collect();
+                let _ = history.record_pii_detections(&rows).await;
+            });
         }
     }
     if let Some(sink) = &ctx.state.events {
@@ -1902,29 +1902,28 @@ async fn embeddings_inner(
                 });
             }
             // Fire-and-forget PII detection counts (one row per kind).
-            if pii_used {
-                if let Some(history) = &state.history {
-                    if !pii_kinds.is_empty() {
-                        let history = Arc::clone(history);
-                        let request_id = request_id.clone();
-                        let key_id = key_id.clone();
-                        let ts = now_unix_ms() as i64;
-                        let kinds = pii_kinds.clone();
-                        tokio::spawn(async move {
-                            let rows: Vec<drgtw_history::PiiDetectionRow> = kinds
-                                .into_iter()
-                                .map(|(entity_kind, count)| drgtw_history::PiiDetectionRow {
-                                    request_id: request_id.clone(),
-                                    key_id: key_id.clone(),
-                                    entity_kind,
-                                    count,
-                                    ts_unix_ms: ts,
-                                })
-                                .collect();
-                            let _ = history.record_pii_detections(&rows).await;
-                        });
-                    }
-                }
+            if pii_used
+                && let Some(history) = &state.history
+                && !pii_kinds.is_empty()
+            {
+                let history = Arc::clone(history);
+                let request_id = request_id.clone();
+                let key_id = key_id.clone();
+                let ts = now_unix_ms() as i64;
+                let kinds = pii_kinds.clone();
+                tokio::spawn(async move {
+                    let rows: Vec<drgtw_history::PiiDetectionRow> = kinds
+                        .into_iter()
+                        .map(|(entity_kind, count)| drgtw_history::PiiDetectionRow {
+                            request_id: request_id.clone(),
+                            key_id: key_id.clone(),
+                            entity_kind,
+                            count,
+                            ts_unix_ms: ts,
+                        })
+                        .collect();
+                    let _ = history.record_pii_detections(&rows).await;
+                });
             }
             if let Some(sink) = &state.events {
                 sink.emit(ev);

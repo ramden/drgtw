@@ -279,7 +279,7 @@ fn render_page_inner(
                             (bool_field("traces", "traces", cfg.otel.traces))
                             (bool_field("metrics", "metrics", cfg.otel.metrics))
                             (bool_field("metrics_include_key_id", "metrics_include_key_id", cfg.otel.metrics_include_key_id))
-                            (float_field("sample_ratio", "sample_ratio", cfg.otel.sample_ratio as f64))
+                            (float_field("sample_ratio", "sample_ratio", cfg.otel.sample_ratio))
                         }
                     }
                 }
@@ -327,6 +327,7 @@ fn render_page_inner(
 // Section form wrapper
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn section_form(
     _state: &UiState,
     section: &str,

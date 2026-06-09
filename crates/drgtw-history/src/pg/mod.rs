@@ -33,7 +33,7 @@ pub(crate) async fn record_usage(pool: &PgPool, ev: &UsageEvent) -> Result<(), H
     let metadata: Option<Value> = ev
         .metadata
         .as_ref()
-        .map(|m| serde_json::to_value(m))
+        .map(serde_json::to_value)
         .transpose()?;
 
     sqlx::query(
@@ -77,7 +77,7 @@ pub(crate) async fn record_usage_batch(
         let metadata: Option<Value> = ev
             .metadata
             .as_ref()
-            .map(|m| serde_json::to_value(m))
+            .map(serde_json::to_value)
             .transpose()?;
 
         sqlx::query(
@@ -138,7 +138,7 @@ pub(crate) async fn recent_usage(
         .map(|r| {
             let metadata_val: Option<Value> = r.try_get("metadata")?;
             let metadata = metadata_val
-                .map(|v| serde_json::from_value(v))
+                .map(serde_json::from_value)
                 .transpose()
                 .map_err(HistoryError::Json)?;
             Ok(UsageEvent {

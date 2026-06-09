@@ -326,10 +326,10 @@ pub async fn mcp_delete(
         Err(_) => return Redirect::to("/ui/mcp"),
     };
 
-    if let Some(servers) = doc.get_mut("mcp_servers") {
-        if let Some(t) = servers.as_table_mut() {
-            t.remove(&name);
-        }
+    if let Some(servers) = doc.get_mut("mcp_servers")
+        && let Some(t) = servers.as_table_mut()
+    {
+        t.remove(&name);
     }
 
     let _ = reloader.apply(&doc.to_string());

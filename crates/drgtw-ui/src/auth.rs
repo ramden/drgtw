@@ -314,10 +314,10 @@ fn unix_now() -> u64 {
 fn extract_cookie<'a>(header: &'a str, name: &str) -> Option<&'a str> {
     for pair in header.split(';') {
         let pair = pair.trim();
-        if let Some(rest) = pair.strip_prefix(name) {
-            if let Some(val) = rest.strip_prefix('=') {
-                return Some(val.trim());
-            }
+        if let Some(rest) = pair.strip_prefix(name)
+            && let Some(val) = rest.strip_prefix('=')
+        {
+            return Some(val.trim());
         }
     }
     None

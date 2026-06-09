@@ -1,5 +1,9 @@
 # DRGTW
 
+> ⚠️ **WIP — alpha software.** This is pre-1.0 and under active development.
+> APIs, config, and behavior may change without notice. Not yet recommended for
+> production use.
+
 Teams want to put LLM providers to work, but their data won't fit through the
 front door: customer names, emails, IBANs, and card numbers can't be shipped off
 to a third-party cloud without tripping over compliance and GDPR — so adoption

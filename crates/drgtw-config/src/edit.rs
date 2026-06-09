@@ -132,27 +132,28 @@ fn set_value_in_table(
 
     // If the next segment after `key` is a decimal integer, treat `key` as an
     // array-of-tables and the integer as a 0-based index.
-    if let (Some(&idx_str), more) = (rest.first(), &rest[1..]) {
-        if let Ok(idx) = idx_str.parse::<usize>() {
-            // Array-of-tables path: key.N.rest…
-            let array_item = table.entry(key).or_insert_with(|| {
-                Item::ArrayOfTables(toml_edit::ArrayOfTables::new())
-            });
-            match array_item {
-                Item::ArrayOfTables(arr) => {
-                    let len = arr.len();
-                    let entry = arr.get_mut(idx).ok_or_else(|| {
-                        ConfigError::Invalid(format!(
-                            "array `{key}` index {idx} is out of bounds (len {len})"
-                        ))
-                    })?;
-                    return set_value_in_table(entry, more, value);
-                }
-                _ => {
-                    return Err(ConfigError::Invalid(format!(
-                        "`{key}` is not an array of tables; cannot index with `{idx_str}`"
-                    )));
-                }
+    if let Some(&idx_str) = rest.first()
+        && let Ok(idx) = idx_str.parse::<usize>()
+    {
+        // Array-of-tables path: key.N.rest…
+        let more = &rest[1..];
+        let array_item = table.entry(key).or_insert_with(|| {
+            Item::ArrayOfTables(toml_edit::ArrayOfTables::new())
+        });
+        match array_item {
+            Item::ArrayOfTables(arr) => {
+                let len = arr.len();
+                let entry = arr.get_mut(idx).ok_or_else(|| {
+                    ConfigError::Invalid(format!(
+                        "array `{key}` index {idx} is out of bounds (len {len})"
+                    ))
+                })?;
+                return set_value_in_table(entry, more, value);
+            }
+            _ => {
+                return Err(ConfigError::Invalid(format!(
+                    "`{key}` is not an array of tables; cannot index with `{idx_str}`"
+                )));
             }
         }
     }
@@ -361,7 +362,7 @@ pub fn write_safe(path: &Path, new_toml_text: &str) -> Result<(), ConfigError> {
 /// `vault`, `mcp_servers`.
 ///
 /// Hot-reloadable (no restart): `model_aliases`, `events`, `tracing`, `otel`.
-pub fn restart_required_changes<'a>(old: &Config, new: &Config) -> Vec<&'static str> {
+pub fn restart_required_changes(old: &Config, new: &Config) -> Vec<&'static str> {
     let mut changed = Vec::new();
 
     if !configs_server_eq(old, new) {

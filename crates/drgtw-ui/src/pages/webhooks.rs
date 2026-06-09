@@ -318,18 +318,18 @@ pub async fn webhooks_rotate(
         use toml_edit::{Item, Table, value};
         if new_secret.is_empty() {
             // Clear the signing secret.
-            if let Some(ev) = doc.get_mut("events") {
-                if let Some(t) = ev.as_table_mut() {
-                    t.remove("signing_secret");
-                }
+            if let Some(ev) = doc.get_mut("events")
+                && let Some(t) = ev.as_table_mut()
+            {
+                t.remove("signing_secret");
             }
         } else {
             // Ensure [events] table exists.
             doc["events"].or_insert(Item::Table(Table::new()));
-            if let Some(ev) = doc.get_mut("events") {
-                if let Some(t) = ev.as_table_mut() {
-                    t["signing_secret"] = value(new_secret);
-                }
+            if let Some(ev) = doc.get_mut("events")
+                && let Some(t) = ev.as_table_mut()
+            {
+                t["signing_secret"] = value(new_secret);
             }
         }
     }
