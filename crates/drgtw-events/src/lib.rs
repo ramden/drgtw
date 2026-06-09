@@ -28,7 +28,7 @@ pub use extract::{
     extract_usage_anthropic, extract_usage_anthropic_stream_delta,
     extract_usage_anthropic_stream_start, extract_usage_openai,
 };
-pub use sink::EventSink;
+pub use sink::{DeliveryLog, DeliveryRecord, EventSink};
 
 /// Lightweight mirror of `drgtw_config::ModelCost` used as the cost-table entry.
 ///

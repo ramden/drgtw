@@ -84,6 +84,7 @@ fn openai_config(
             models: Some(vec!["text-embedding-3-small".into(), "gpt-4o".into()]),
             rate_limit: None,
             budget: None,
+            mcp_servers: None,
         }],
         pii: PiiConfig {
             enabled_by_default: pii_enabled,

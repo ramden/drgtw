@@ -40,7 +40,7 @@ use drgtw_mcp::{
 use drgtw_trace::{McpMeta, TraceEntry, TraceKind};
 use serde_json::{Value, json};
 
-use crate::ProxyState;
+use crate::{Live, ProxyState};
 use crate::error::{ErrorFormat, ProxyError};
 
 /// `GET`/`DELETE /mcp` → 405. v1 supports only the `POST` streamable-HTTP
@@ -51,11 +51,13 @@ pub async fn method_not_allowed() -> Response {
 
 /// `POST /mcp` — the MCP JSON-RPC entry point.
 pub async fn handle_post(State(state): State<Arc<ProxyState>>, req: Request) -> Response {
+    // Load a snapshot of the hot-swappable live bundle once per request.
+    let live = state.live.load();
     let (parts, body) = req.into_parts();
 
     // 1. Authenticate exactly like the other endpoints. Auth failures escape the
     //    JSON-RPC envelope and reuse the standard 401 error shape.
-    let resolved = match state.keys.authenticate(&parts.headers) {
+    let resolved = match live.keys.authenticate(&parts.headers) {
         Ok(r) => r,
         Err(e) => return ProxyError::from(e).into_response_fmt(ErrorFormat::OpenAi),
     };
@@ -63,7 +65,7 @@ pub async fn handle_post(State(state): State<Arc<ProxyState>>, req: Request) -> 
     let key_id = resolved.key_id.clone();
 
     // 2. Buffer the body (enforce the configured max-body limit).
-    let max = state.config.server.max_body_bytes;
+    let max = live.config.server.max_body_bytes;
     let raw: Bytes = match to_bytes(body, max).await {
         Ok(b) => b,
         Err(_) => return ProxyError::BodyTooLarge.into_response_fmt(ErrorFormat::OpenAi),
@@ -101,14 +103,36 @@ pub async fn handle_post(State(state): State<Arc<ProxyState>>, req: Request) -> 
 
     let id = rpc.id.clone();
 
-    // 5. Dispatch by method.
+    // 5. Build the inbound header list for per-server forwarding.
+    //    Skip hop-by-hop / pseudo headers that must never be proxied.
+    //    The per-server `forward_headers` allowlist in the config decides
+    //    which of these actually reach each upstream.
+    let inbound: Vec<(String, String)> = parts
+        .headers
+        .iter()
+        .filter_map(|(name, value)| {
+            let lc = name.as_str().to_ascii_lowercase();
+            // Always skip: hop-by-hop headers and host.
+            if matches!(
+                lc.as_str(),
+                "host" | "content-length" | "connection" | "transfer-encoding"
+                    | "te" | "trailer" | "upgrade" | "keep-alive"
+            ) {
+                return None;
+            }
+            let v = value.to_str().ok()?;
+            Some((name.as_str().to_owned(), v.to_owned()))
+        })
+        .collect();
+
+    // 6. Dispatch by method.
     let method = rpc.method.clone();
     match method.as_str() {
         "initialize" => initialize_response(id),
         "ping" => json_rpc_response(JsonRpcResponse::success(id, json!({}))),
         "tools/list" => {
             let started = Instant::now();
-            let tools = state.mcp.aggregate_tools().await;
+            let tools = live.mcp.aggregate_tools(&inbound).await;
             // Method-only trace (no args/output for listing).
             emit_trace_mcp(
                 &state,
@@ -125,7 +149,9 @@ pub async fn handle_post(State(state): State<Arc<ProxyState>>, req: Request) -> 
             );
             json_rpc_response(JsonRpcResponse::success(id, json!({ "tools": tools })))
         }
-        "tools/call" => tools_call(&state, id, rpc.params, &request_id, &key_id).await,
+        "tools/call" => {
+            tools_call(&state, &live, id, rpc.params, &request_id, &key_id, &inbound).await
+        }
         _ => json_rpc_response(JsonRpcResponse::error(
             id,
             METHOD_NOT_FOUND,
@@ -153,10 +179,12 @@ fn initialize_response(id: Option<Value>) -> Response {
 /// carrying the tool name, routed server, arguments, and output/status.
 async fn tools_call(
     state: &ProxyState,
+    live: &Live,
     id: Option<Value>,
     params: Option<Value>,
     request_id: &str,
     key_id: &str,
+    inbound: &[(String, String)],
 ) -> Response {
     let started = Instant::now();
 
@@ -193,10 +221,10 @@ async fn tools_call(
 
     // Capture the routed upstream server name (longest-prefix match) before the
     // call. `None` when no server owns the prefix (unknown tool).
-    let server = state.mcp.route(name).map(|(c, _)| c.name().to_owned());
+    let server = live.mcp.route(name).map(|(c, _)| c.name().to_owned());
     let args_for_trace = Some(arguments.clone());
 
-    match state.mcp.call(name, arguments).await {
+    match live.mcp.call(name, arguments, inbound).await {
         Ok(result) => {
             emit_trace_mcp(
                 state,

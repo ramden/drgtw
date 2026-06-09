@@ -13,6 +13,10 @@ drgtw-otel.workspace = true
 drgtw-pii.workspace = true
 drgtw-trace.workspace = true
 drgtw-vault.workspace = true
+# Optional Postgres history store for fire-and-forget usage recording. Depended
+# on without `postgres` by default (no-op disabled handle); the bin's `ui`
+# feature turns it on. See [features].
+drgtw-history.workspace = true
 
 aws-sigv4.workspace = true
 aws-credential-types.workspace = true
@@ -31,6 +35,12 @@ tokio.workspace = true
 tracing.workspace = true
 url.workspace = true
 uuid.workspace = true
+arc-swap.workspace = true
+
+[features]
+# Enable the live Postgres history store (pulls in sqlx via drgtw-history).
+# Off by default so this crate builds/tests DB-free.
+postgres = ["drgtw-history/postgres"]
 
 [dev-dependencies]
 wiremock.workspace = true

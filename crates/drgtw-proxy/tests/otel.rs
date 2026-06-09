@@ -61,6 +61,7 @@ fn chat_config(mock_base_url: &str) -> Arc<Config> {
             models: Some(vec!["gpt-4o".into()]),
             rate_limit: None,
             budget: None,
+            mcp_servers: None,
         }],
         pii: PiiConfig::default(),
         events: None,

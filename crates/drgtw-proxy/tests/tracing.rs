@@ -68,6 +68,7 @@ fn chat_config(mock_base_url: &str, tracing: TracingConfig) -> Arc<Config> {
             models: Some(vec!["gpt-4o".into()]),
             rate_limit: None,
             budget: None,
+            mcp_servers: None,
         }],
         pii: PiiConfig::default(),
         events: None,
@@ -91,6 +92,7 @@ fn mcp_config(upstream_url: &str, dir: &std::path::Path) -> Arc<Config> {
             auth_type: McpAuthType::None,
             auth_value: None,
             extra_headers: HashMap::new(),
+            forward_headers: vec![],
         },
     );
     Arc::new(Config {
@@ -105,6 +107,7 @@ fn mcp_config(upstream_url: &str, dir: &std::path::Path) -> Arc<Config> {
             models: Some(vec![]),
             rate_limit: None,
             budget: None,
+            mcp_servers: None,
         }],
         pii: PiiConfig::default(),
         events: None,

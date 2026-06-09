@@ -58,6 +58,7 @@ fn openai_pii_config(mock_base_url: &str, pii_enabled: bool) -> Arc<Config> {
             models: Some(vec!["gpt-4o".into()]),
             rate_limit: None,
             budget: None,
+            mcp_servers: None,
         }],
         pii: PiiConfig {
             enabled_by_default: pii_enabled,
@@ -99,6 +100,7 @@ fn anthropic_pii_config(mock_base_url: &str, pii_enabled: bool) -> Arc<Config> {
             models: Some(vec!["claude-3-5-sonnet".into()]),
             rate_limit: None,
             budget: None,
+            mcp_servers: None,
         }],
         pii: PiiConfig {
             enabled_by_default: pii_enabled,

@@ -1,48 +1,101 @@
-//! `GET /ui` — the dashboard. The one page with the most life: four hero metric
-//! cards, an interactive Chart.js area chart (range toggle, theme-aware, line
-//! draw on mount, latest point ticks off the existing /events SSE), and a
+//! `GET /ui` — the dashboard. The one page with the most life: hero metric
+//! cards, an interactive Chart.js area chart (range toggle via the
+//! `/ui/api/timeseries` JSON API, theme-aware, line draw on mount), and a
 //! recent-requests glass table.
 //!
-//! All numbers are synthesized and clearly labeled "demo data" — the gateway
-//! ships no historical store in this concept.
+//! All numbers are real, pulled from the Postgres history store via
+//! [`crate::UiState::history`]. When no store is connected (or a query errors)
+//! the page renders zero/empty state — never a 500.
 
+use axum::extract::State;
+use axum::response::Html;
 use maud::{Markup, PreEscaped, html};
 
-use crate::UiState;
-use crate::layout::{self, Nav, badge, page_header, shell};
+use drgtw_history::UsageSummary;
 
-pub fn dashboard(state: &UiState) -> Markup {
+use crate::pages::{
+    fmt_cost, fmt_int, fmt_latency, fmt_ts, status_kind, timeseries_json,
+};
+use crate::layout::{self, Nav, badge, page_header, shell};
+use crate::{UiState, range_window};
+
+/// Async handler: queries the last-24h summary, the 24h/Hour timeseries (for
+/// the chart's initial render), and the 8 most recent requests.
+pub async fn dashboard(State(state): State<UiState>) -> Html<String> {
+    let (since, until, bucket) = range_window("24h");
+
+    let (summary, traffic_json, recent) = match state.history() {
+        Some(h) => {
+            let summary = h.usage_summary(since, until).await.unwrap_or_else(|_| zero_summary());
+            let buckets = h.usage_timeseries(since, until, bucket).await.unwrap_or_default();
+            let traffic_json = timeseries_json(&buckets, bucket).to_string();
+            let recent = h.recent_usage(8).await.unwrap_or_default();
+            (summary, traffic_json, recent)
+        }
+        None => (zero_summary(), timeseries_json(&[], bucket).to_string(), Vec::new()),
+    };
+
+    Html(render(&state, &summary, &traffic_json, &recent).into_string())
+}
+
+fn zero_summary() -> UsageSummary {
+    UsageSummary {
+        requests: 0,
+        input_tokens: 0,
+        output_tokens: 0,
+        cost_usd: 0.0,
+        avg_latency_ms: 0.0,
+        pii_count: 0,
+        error_count: 0,
+    }
+}
+
+fn render(
+    state: &UiState,
+    s: &UsageSummary,
+    traffic_json: &str,
+    recent: &[drgtw_events::UsageEvent],
+) -> Markup {
     let cfg = &state.config;
     let unlocked = cfg.ui.history.is_some();
     let model_count: usize = cfg.connections.iter().map(|c| c.models.len()).sum();
+    let total_tokens = s.input_tokens + s.output_tokens;
 
     let body = html! {
         (page_header("Dashboard", "Live gateway status and traffic at a glance."))
 
+        // Server-rendered initial chart series. The Chart.js bootstrap consumes
+        // this on mount; the range toggle refetches from /ui/api/timeseries.
+        script { (PreEscaped(format!("window.__traffic = {traffic_json};"))) }
+
         // Datastar: `uptime` ticks from /ui/events; the chart hook reads it to
         // nudge the latest data point so the graph feels alive.
-        div data-signals="{uptime: '0s'}" data-init="@get('/ui/events')" {
+        // `space-y-6` here (not just on the shell wrapper) because all the
+        // dashboard sections live INSIDE this Datastar SSE container — the
+        // shell's spacer only reaches this div, not its children.
+        div data-signals="{uptime: '0s'}" data-init="@get('/ui/events')" class="space-y-6" {
             // Hidden probe bound to the live `uptime` signal patched by the SSE
             // stream; the chart reads it to tick the latest point in real time.
             span id="uptimeProbe" class="sr-only" data-text="$uptime" {}
 
-            // --- hero metric cards ---
-            div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6" {
-                (metric_card(1, layout::ICON_BOLT, "Requests · 24h", "48,213", "▲ 12.4%", true, "vs. previous day"))
-                (metric_card(2, layout::ICON_TOKENS, "Tokens processed", "31.8M", "▲ 8.1%", true, "in + out, last 24h"))
-                (metric_card(3, layout::ICON_SHIELD, "PII entities redacted", "9,742", "▲ 3.6%", true, "across all connections"))
-                (metric_card(4, layout::ICON_GAUGE, "Avg latency", "412ms", "▼ 5.2%", true, "p50 upstream round-trip"))
+            // --- metric cards (last 24h) — one uniform grid: 2-up on mobile,
+            // 3-up on desktop, all cells equal size (no half-width voids).
+            div class="grid grid-cols-2 lg:grid-cols-3 gap-4" {
+                (metric_card(1, layout::ICON_BOLT, "Requests · 24h", &fmt_int(s.requests), "last 24h"))
+                (metric_card(2, layout::ICON_TOKENS, "Tokens processed", &fmt_int(total_tokens), "in + out, last 24h"))
+                (metric_card(3, layout::ICON_COINS, "Cost · 24h", &fmt_cost(s.cost_usd), "estimated spend"))
+                (metric_card(4, layout::ICON_GAUGE, "Avg latency", &fmt_latency(s.avg_latency_ms), "upstream round-trip"))
+                (metric_card(5, layout::ICON_SHIELD, "PII entities redacted", &fmt_int(s.pii_count), "across all connections, 24h"))
+                (metric_card(6, layout::ICON_GAUGE2, "Errors · 24h", &fmt_int(s.error_count), "non-2xx responses"))
             }
 
             // --- traffic chart ---
-            div class="glass lift rise p-5 mb-6" style="--i:5" {
+            div class="rise grid" style="--i:7" {
+              div class="glass lift p-5 min-w-0" {
                 div class="flex flex-wrap items-center justify-between gap-3 mb-4" {
                     div {
-                        div class="flex items-center gap-2" {
-                            h3 class="text-base font-semibold" { "Gateway traffic" }
-                            (badge("muted", "demo data"))
-                        }
-                        p class="text-xs text-muted-foreground mt-0.5" { "Requests per interval · live tail" }
+                        h3 class="text-base font-semibold" { "Gateway traffic" }
+                        p class="text-xs text-muted-foreground mt-0.5" { "Requests per interval" }
                     }
                     // Segmented range control (Datastar signal drives the chart).
                     div data-signals="{range: '24h'}" class="inline-flex rounded-lg border border-border bg-card/40 p-0.5 text-xs" {
@@ -51,37 +104,34 @@ pub fn dashboard(state: &UiState) -> Markup {
                         (range_btn("30d"))
                     }
                 }
-                div class="relative h-[280px]" {
+                div class="relative h-[280px] min-w-0" {
                     canvas id="trafficChart" {}
                 }
+              }
             }
 
             // --- inventory strip ---
-            div class="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6" {
-                (count_card(6, "Connections", cfg.connections.len(), "/ui/connections"))
-                (count_card(7, "Virtual keys", cfg.virtual_keys.len(), "/ui/keys"))
-                (count_card(8, "Models", model_count, "/ui/connections"))
-                (count_card(9, "MCP servers", cfg.mcp_servers.len(), "/ui/mcp"))
+            div class="grid grid-cols-2 sm:grid-cols-4 gap-4" {
+                (count_card(8, "Connections", cfg.connections.len(), "/ui/connections"))
+                (count_card(9, "Virtual keys", cfg.virtual_keys.len(), "/ui/keys"))
+                (count_card(10, "Models", model_count, "/ui/connections"))
+                (count_card(11, "MCP servers", cfg.mcp_servers.len(), "/ui/mcp"))
             }
 
             // --- recent requests ---
-            div class="glass rise overflow-hidden" style="--i:10" {
+            div class="rise grid" style="--i:12" {
+              div class="glass overflow-hidden" {
                 div class="flex items-center justify-between px-5 py-3.5 border-b border-border" {
-                    div class="flex items-center gap-2" {
-                        h3 class="text-base font-semibold" { "Recent requests" }
-                        (badge("muted", "demo data"))
-                    }
-                    div class="text-xs text-muted-foreground flex items-center gap-2" {
-                        span class="live-dot" {} "streaming"
-                    }
+                    h3 class="text-base font-semibold" { "Recent requests" }
+                    a href="/ui/traces" class="text-xs text-primary hover:underline" { "View all traces →" }
                 }
                 div class="overflow-x-auto" {
                     table class="w-full text-sm" {
                         thead {
                             tr class="text-left text-[11px] uppercase tracking-wide text-muted-foreground border-b border-border" {
                                 th class="font-medium px-5 py-2.5" { "Time" }
-                                th class="font-medium px-5 py-2.5" { "Virtual key" }
                                 th class="font-medium px-5 py-2.5" { "Model" }
+                                th class="font-medium px-5 py-2.5" { "Connection" }
                                 th class="font-medium px-5 py-2.5 text-right" { "Tokens" }
                                 th class="font-medium px-5 py-2.5 text-right" { "Latency" }
                                 th class="font-medium px-5 py-2.5" { "PII" }
@@ -89,20 +139,27 @@ pub fn dashboard(state: &UiState) -> Markup {
                             }
                         }
                         tbody {
-                            (req_row("12:04:51", "sk-…001", "gpt-4o", "1,284", "388ms", "3", "ok", "200"))
-                            (req_row("12:04:47", "sk-…002", "claude-sonnet-4-5", "2,019", "511ms", "0", "ok", "200"))
-                            (req_row("12:04:39", "sk-…001", "gpt-4o-mini", "642", "201ms", "1", "ok", "200"))
-                            (req_row("12:04:30", "sk-…002", "claude-opus-4-5", "3,771", "904ms", "5", "warn", "200"))
-                            (req_row("12:04:18", "sk-…001", "gpt-4o", "0", "44ms", "—", "down", "429"))
-                            (req_row("12:04:02", "sk-…001", "claude-sonnet-4-5", "1,506", "473ms", "2", "ok", "200"))
+                            @if recent.is_empty() {
+                                tr {
+                                    td class="px-5 py-6 text-center text-sm text-muted-foreground" colspan="7" {
+                                        "No requests recorded yet."
+                                    }
+                                }
+                            } @else {
+                                @for ev in recent {
+                                    (req_row(ev))
+                                }
+                            }
                         }
                     }
                 }
+              }
             }
         }
 
         // Chart.js bootstrap. Reads colors from CSS vars via getComputedStyle so
-        // it tracks the theme; synthesizes the series per range; animates the
+        // it tracks the theme; consumes the server-rendered `window.__traffic`
+        // series; refetches from /ui/api/timeseries on range change; animates the
         // line draw on mount; ticks the latest point off the live `uptime` signal.
         script { (PreEscaped(CHART_JS)) }
     };
@@ -110,28 +167,30 @@ pub fn dashboard(state: &UiState) -> Markup {
     shell("Dashboard", "Dashboard", Nav::Dashboard, unlocked, cfg.ui.auth.as_ref().map(|a| a.username.as_str()), body)
 }
 
-fn metric_card(i: usize, icon: &str, label: &str, value: &str, trend: &str, up: bool, caption: &str) -> Markup {
-    let trend_cls = if up { "badge-ok" } else { "badge-down" };
+fn metric_card(i: usize, icon: &str, label: &str, value: &str, caption: &str) -> Markup {
     html! {
-        div class="glass glass-metric lift rise p-5" style=(format!("--i:{i}")) {
+        div class="rise grid" style=(format!("--i:{i}")) {
+          div class="glass glass-metric lift p-5" {
             div class="flex items-center justify-between mb-3" {
                 div class="size-9 rounded-lg icon-orb grid place-items-center text-primary" {
                     span class="size-5 grid place-items-center" { (PreEscaped(icon)) }
                 }
-                span class=(format!("inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium {trend_cls}")) { (trend) }
             }
             div class="text-3xl font-semibold stat-gradient leading-none" { (value) }
             div class="text-sm font-medium mt-2" { (label) }
             div class="text-xs text-muted-foreground mt-0.5" { (caption) }
+          }
         }
     }
 }
 
 fn count_card(i: usize, label: &str, n: usize, href: &str) -> Markup {
     html! {
-        a href=(href) class="glass lift rise p-5 block" style=(format!("--i:{i}")) {
+        div class="rise grid" style=(format!("--i:{i}")) {
+          a href=(href) class="glass lift p-5 block" {
             div class="text-2xl font-semibold tnum leading-none" { (n) }
             div class="text-sm text-muted-foreground mt-1.5" { (label) }
+          }
         }
     }
 }
@@ -150,17 +209,18 @@ fn range_btn(label: &str) -> Markup {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn req_row(time: &str, key: &str, model: &str, tokens: &str, latency: &str, pii: &str, status_kind: &str, status: &str) -> Markup {
+fn req_row(ev: &drgtw_events::UsageEvent) -> Markup {
+    let tokens = ev.input_tokens.unwrap_or(0) + ev.output_tokens.unwrap_or(0);
+    let pii = if ev.pii { "yes" } else { "—" };
     html! {
         tr class="row-lift border-b border-border/50 last:border-0" {
-            td class="px-5 py-2.5 font-mono text-[12.5px] text-muted-foreground" { (time) }
-            td class="px-5 py-2.5 font-mono text-[12.5px]" { (key) }
-            td class="px-5 py-2.5 font-mono text-[12.5px]" { (model) }
-            td class="px-5 py-2.5 text-right tnum" { (tokens) }
-            td class="px-5 py-2.5 text-right tnum text-muted-foreground" { (latency) }
+            td class="px-5 py-2.5 font-mono text-[12.5px] text-muted-foreground" { (fmt_ts(ev.ts_unix_ms as i64)) }
+            td class="px-5 py-2.5 font-mono text-[12.5px]" { (ev.model) }
+            td class="px-5 py-2.5 font-mono text-[12.5px] text-muted-foreground" { (ev.connection) }
+            td class="px-5 py-2.5 text-right tnum" { (fmt_int(tokens as i64)) }
+            td class="px-5 py-2.5 text-right tnum text-muted-foreground" { (fmt_latency(ev.latency_ms as f64)) }
             td class="px-5 py-2.5 tnum text-muted-foreground" { (pii) }
-            td class="px-5 py-2.5" { (badge(status_kind, status)) }
+            td class="px-5 py-2.5" { (badge(status_kind(ev.status), &ev.status.to_string())) }
         }
     }
 }
@@ -194,28 +254,10 @@ const CHART_JS: &str = r##"
     return 'rgba(' + m[0] + ',' + m[1] + ',' + m[2] + ',' + a + ')';
   }
 
-  // Deterministic pseudo-random so the demo series is stable across reloads.
-  function series(n, seed, base, amp) {
-    var out = [], s = seed;
-    for (var i = 0; i < n; i++) {
-      s = (s * 9301 + 49297) % 233280;
-      var r = s / 233280;
-      var wave = Math.sin(i / (n / 6)) * amp * 0.5;
-      out.push(Math.max(0, Math.round(base + wave + (r - 0.5) * amp)));
-    }
-    return out;
-  }
-  function labels(range) {
-    if (range === '24h') return Array.from({length: 24}, function (_, i) { return ((i) % 24) + ':00'; });
-    if (range === '7d')  return ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
-    return Array.from({length: 30}, function (_, i) { return 'D' + (i + 1); });
-  }
-  function dataFor(range) {
-    if (range === '24h') return series(24, 7, 1800, 1400);
-    if (range === '7d')  return series(7, 13, 42000, 18000);
-    return series(30, 29, 41000, 22000);
-  }
-
+  // Initial series is server-rendered into window.__traffic; range toggles
+  // refetch the JSON API and rebuild.
+  var data = (window.__traffic && window.__traffic.labels) ? window.__traffic
+           : { labels: [], requests: [] };
   var range = '24h';
   var ctx = el.getContext('2d');
 
@@ -234,10 +276,10 @@ const CHART_JS: &str = r##"
     return new Chart(ctx, {
       type: 'line',
       data: {
-        labels: labels(range),
+        labels: data.labels || [],
         datasets: [{
           label: 'Requests',
-          data: dataFor(range),
+          data: data.requests || [],
           borderColor: accent,
           borderWidth: 2,
           fill: true,
@@ -254,6 +296,8 @@ const CHART_JS: &str = r##"
         responsive: true,
         maintainAspectRatio: false,
         animation: { duration: 900, easing: 'easeOutCubic' },
+        // Headroom so the area never touches the card's top edge.
+        layout: { padding: { top: 8 } },
         interaction: { intersect: false, mode: 'index' },
         plugins: {
           legend: { display: false },
@@ -267,7 +311,7 @@ const CHART_JS: &str = r##"
         },
         scales: {
           x: { grid: { display: false }, ticks: { color: tick, maxTicksLimit: 8, font: { size: 11 } }, border: { display: false } },
-          y: { grid: { color: grid }, ticks: { color: tick, font: { size: 11 }, callback: function (v) { return v >= 1000 ? (v / 1000) + 'k' : v; } }, border: { display: false } }
+          y: { beginAtZero: true, grace: '8%', grid: { color: grid }, ticks: { color: tick, font: { size: 11 }, precision: 0, maxTicksLimit: 6, callback: function (v) { return v >= 1000 ? (v / 1000) + 'k' : v; } }, border: { display: false } }
         }
       }
     });
@@ -277,9 +321,16 @@ const CHART_JS: &str = r##"
 
   function rebuild() { chart.destroy(); chart = build(); }
 
+  function load(r) {
+    fetch('/ui/api/timeseries?range=' + encodeURIComponent(r), { headers: { 'Accept': 'application/json' } })
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (json) { if (json) { data = json; rebuild(); } })
+      .catch(function () {});
+  }
+
   // Range toggle: Datastar drives the `btn-brand` class onto the active range
-  // button via data-class. We watch which segmented button is active (by class
-  // + its label text) and rebuild when it changes. Cheap poll, demo-only.
+  // button via data-class. Watch which segmented button is active (class +
+  // label text) and refetch when it changes.
   var rangeButtons = ['24h', '7d', '30d'];
   setInterval(function () {
     var picked = null;
@@ -287,25 +338,12 @@ const CHART_JS: &str = r##"
       var t = b.textContent.trim();
       if (rangeButtons.indexOf(t) !== -1 && b.classList.contains('btn-brand')) picked = t;
     });
-    if (picked && picked !== range) { range = picked; rebuild(); }
+    if (picked && picked !== range) { range = picked; load(range); }
   }, 250);
 
-  // Live tail: nudge the latest point whenever the SSE-driven `uptime` probe
-  // changes (once per second from /ui/events). Falls back to a timer so the
-  // graph still breathes if the stream is unavailable.
-  function tick() {
-    var ds = chart.data.datasets[0].data;
-    if (!ds.length) return;
-    var last = ds[ds.length - 1];
-    var jitter = Math.round((Math.random() - 0.4) * Math.max(40, last * 0.04));
-    ds[ds.length - 1] = Math.max(0, last + jitter);
-    chart.update('none');
-  }
-  var probe = document.getElementById('uptimeProbe');
-  var lastSeen = probe ? probe.textContent : '';
-  setInterval(function () {
-    if (probe && probe.textContent !== lastSeen) { lastSeen = probe.textContent; tick(); }
-  }, 1000);
+  // (Removed the synthetic random "live tail" — it nudged the last point every
+  // second with Math.random(), making the chart jump constantly and showing
+  // fake data. The chart now reflects only real timeseries from the range load.)
 
   // Re-theme the chart when the light/dark toggle fires.
   window.addEventListener('drgtw-theme-change', function () { rebuild(); });

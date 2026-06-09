@@ -49,9 +49,13 @@ impl McpGateway {
     /// Each returned tool object has its `name` rewritten to the prefixed
     /// `"{server}-{tool}"` form; all other fields are left untouched. A server
     /// that fails to respond is logged at `warn` level and skipped.
-    pub async fn aggregate_tools(&self) -> Vec<Value> {
+    ///
+    /// `inbound` is the list of (name, value) header pairs from the incoming
+    /// request. Each upstream filters them through its own `forward_headers`
+    /// allowlist.
+    pub async fn aggregate_tools(&self, inbound: &[(String, String)]) -> Vec<Value> {
         let futures = self.clients.iter().map(|client| async move {
-            match client.list_tools().await {
+            match client.list_tools(inbound).await {
                 Ok(tools) => {
                     let prefix = client.name().to_string();
                     tools
@@ -101,9 +105,16 @@ impl McpGateway {
     }
 
     /// Route and invoke a prefixed tool with `arguments`.
-    pub async fn call(&self, prefixed: &str, arguments: Value) -> Result<Value, GatewayCallError> {
+    ///
+    /// `inbound` is passed to the owning upstream client for header forwarding.
+    pub async fn call(
+        &self,
+        prefixed: &str,
+        arguments: Value,
+        inbound: &[(String, String)],
+    ) -> Result<Value, GatewayCallError> {
         let (client, bare) = self.route(prefixed).ok_or(GatewayCallError::UnknownTool)?;
-        Ok(client.call_tool(&bare, arguments).await?)
+        Ok(client.call_tool(&bare, arguments, inbound).await?)
     }
 }
 
@@ -118,6 +129,7 @@ mod tests {
                 name: (*n).to_string(),
                 url: format!("http://localhost/{n}"),
                 headers: vec![],
+                forward_headers: vec![],
             })
             .collect();
         McpGateway::new(servers, reqwest::Client::new())

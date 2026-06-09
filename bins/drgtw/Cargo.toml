@@ -11,6 +11,7 @@ drgtw-pii.workspace = true
 drgtw-proxy.workspace = true
 drgtw-ui.workspace = true
 drgtw-ui-auth.workspace = true
+drgtw-history.workspace = true
 
 axum.workspace = true
 clap.workspace = true
@@ -20,10 +21,22 @@ tower.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+[features]
+# `ui` is on by default: the embedded admin UI with the live Postgres history
+# store. It propagates `postgres` into drgtw-history (sqlx), drgtw-ui, and
+# drgtw-proxy so the boot connect + fire-and-forget recording are compiled in.
+# Building `--no-default-features` drops sqlx entirely: History::connect is
+# absent and the UI renders the "built without Postgres support" setup page.
+default = ["ui"]
+ui = ["drgtw-history/postgres", "drgtw-ui/postgres", "drgtw-proxy/postgres"]
+
 [dev-dependencies]
 drgtw-config.workspace = true
 drgtw-proxy.workspace = true
 drgtw-ui-auth.workspace = true
+# UsageEvent constructor for seeding the history store in the DATABASE_URL-gated
+# UI integration tests.
+drgtw-events.workspace = true
 axum.workspace = true
 bytes.workspace = true
 http-body-util = "0.1"

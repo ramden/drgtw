@@ -680,6 +680,22 @@ pub(crate) fn validate_inner(config: &Config, ui_mode: bool) -> Result<(), Confi
                 )));
             }
         }
+        if let Some(mcp_list) = &vk.mcp_servers {
+            if mcp_list.is_empty() {
+                return Err(ConfigError::Invalid(format!(
+                    "virtual key `{}` mcp_servers allowlist is empty; omit the field to allow all",
+                    vk.key
+                )));
+            }
+            for server_name in mcp_list {
+                if !config.mcp_servers.contains_key(server_name.as_str()) {
+                    return Err(ConfigError::Invalid(format!(
+                        "virtual key `{}` mcp_servers references unknown server `{}`",
+                        vk.key, server_name
+                    )));
+                }
+            }
+        }
     }
 
     // --- PII custom recognizers ---

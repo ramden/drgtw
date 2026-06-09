@@ -28,6 +28,30 @@ use serde::Deserialize;
 
 use crate::UiState;
 
+/// Append an audit entry if a live history store is connected. Awaited but
+/// best-effort — errors are ignored (auth is not a hot path, and the audit log
+/// must never block or fail a login/logout).
+async fn audit(state: &UiState, actor: &str, action: &str, detail: serde_json::Value) {
+    if let Some(h) = state.history() {
+        let entry = drgtw_history::AuditEntry {
+            ts_unix_ms: unix_now_ms(),
+            actor: actor.to_owned(),
+            action: action.to_owned(),
+            target: "ui".to_owned(),
+            detail,
+        };
+        let _ = h.append_audit(&entry).await;
+    }
+}
+
+/// Current epoch time in milliseconds.
+fn unix_now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 // ----------------------------------------------------------------- constants
 
 const COOKIE_NAME: &str = "drgtw_ui_session";
@@ -122,24 +146,55 @@ pub async fn post_login(
 
     // Verify CSRF first.
     if !verify_csrf(&form.csrf_token, key, csrf_session_id) {
+        audit(&state, &form.username, "login.failure", serde_json::json!({"reason": "csrf"})).await;
         return Html(render_login_page(&state.config, Some("Invalid credentials.")).into_string())
             .into_response();
     }
 
-    // Verify username + password (constant-time on password; username is
-    // compared with == which is fine for admin use).
-    let username_ok = form.username == auth_cfg.username;
-    let password_ok = verify_password(&form.password, &auth_cfg.password_hash);
+    // Verify username + password against the config-user first (constant-time
+    // on password; username is compared with == which is fine for admin use).
+    let config_username_ok = form.username == auth_cfg.username;
+    let config_password_ok = verify_password(&form.password, &auth_cfg.password_hash);
 
-    if !username_ok || !password_ok {
-        return Html(render_login_page(&state.config, Some("Invalid credentials.")).into_string())
-            .into_response();
+    // If config-user check passes, proceed immediately.  Otherwise fall through
+    // to the DB co-admin lookup so team members can log in too.
+    let authed_username: String;
+    if config_username_ok && config_password_ok {
+        authed_username = auth_cfg.username.clone();
+    } else {
+        // Try the history store (co-admins created via the Team page).
+        let db_match = if let Some(h) = state.history() {
+            match h.find_user(&form.username).await {
+                Ok(Some(row)) if verify_password(&form.password, &row.password_hash) => {
+                    // Persist the session record so it can be revoked later.
+                    let session_id = format!("ui-{}", unix_now());
+                    let ttl_secs = auth_cfg.session_ttl_hours * 3600;
+                    let expires_ms = unix_now_ms() + (ttl_secs as i64) * 1000;
+                    let _ = h.create_session(&session_id, row.id, expires_ms).await;
+                    Some(row.username)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        match db_match {
+            Some(u) => authed_username = u,
+            None => {
+                audit(&state, &form.username, "login.failure", serde_json::json!({"reason": "credentials"})).await;
+                return Html(render_login_page(&state.config, Some("Invalid credentials.")).into_string())
+                    .into_response();
+            }
+        }
     }
+
+    audit(&state, &authed_username, "login.success", serde_json::json!({})).await;
 
     // Mint a session token.
     let ttl_secs = auth_cfg.session_ttl_hours * 3600;
     let exp_unix = unix_now() + ttl_secs;
-    let session = Session { sub: auth_cfg.username.clone(), exp_unix };
+    let session = Session { sub: authed_username.clone(), exp_unix };
     let token = sign_session(&session, key);
 
     // Build the Set-Cookie header. `secure=false` for localhost dev; operators
@@ -157,7 +212,10 @@ pub async fn post_login(
 // ----------------------------------------------------------------- logout POST
 
 /// `POST /ui/logout` — clear cookie and redirect to login.
-pub async fn post_logout() -> Response {
+pub async fn post_logout(State(state): State<UiState>) -> Response {
+    let actor = state.config.ui.auth.as_ref().map(|a| a.username.clone()).unwrap_or_else(|| "operator".to_owned());
+    audit(&state, &actor, "logout", serde_json::json!({})).await;
+
     let clear = clear_cookie(COOKIE_NAME);
     let mut response = Redirect::to("/ui/login").into_response();
     response.headers_mut().insert(
@@ -215,7 +273,7 @@ fn render_login_page(config: &Config, error: Option<&str>) -> Markup {
                                     name="username"
                                     autocomplete="username"
                                     required
-                                    class="bc-input w-full"
+                                    class="input w-full"
                                     placeholder="admin";
                             }
 
@@ -227,13 +285,13 @@ fn render_login_page(config: &Config, error: Option<&str>) -> Markup {
                                     name="password"
                                     autocomplete="current-password"
                                     required
-                                    class="bc-input w-full"
+                                    class="input w-full"
                                     placeholder="••••••••";
                             }
 
                             button
                                 type="submit"
-                                class="bc-btn bc-btn-primary w-full mt-2"
+                                class="btn-primary w-full mt-2"
                             { "Sign in" }
                         }
                     }
@@ -268,6 +326,7 @@ fn extract_cookie<'a>(header: &'a str, name: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use drgtw_ui_auth::password::hash_password;
 
     #[test]
     fn extract_cookie_finds_named_value() {
@@ -284,5 +343,31 @@ mod tests {
     #[test]
     fn extract_cookie_empty_header_returns_none() {
         assert_eq!(extract_cookie("", "drgtw_ui_session"), None);
+    }
+
+    // ---- DB-login credential helpers ----------------------------------------
+
+    /// The happy path: a hash produced by `hash_password` is accepted by
+    /// `verify_password` — the argon2id round-trip that the DB-login branch
+    /// relies on.
+    #[test]
+    fn password_hash_round_trip() {
+        let pw = "hunter2-secret";
+        let hash = hash_password(pw).expect("hash succeeds");
+        assert!(verify_password(pw, &hash), "correct pw must verify");
+    }
+
+    /// Wrong password must not verify — DB-login sad path.
+    #[test]
+    fn wrong_password_does_not_verify() {
+        let hash = hash_password("correct-pw").expect("hash succeeds");
+        assert!(!verify_password("wrong-pw", &hash));
+    }
+
+    /// `unix_now` must return a plausible epoch (after 2024-01-01).
+    #[test]
+    fn unix_now_is_sane() {
+        let now = unix_now();
+        assert!(now > 1_700_000_000, "unix_now must be after 2023: {now}");
     }
 }

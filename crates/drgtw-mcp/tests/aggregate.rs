@@ -62,17 +62,19 @@ async fn aggregates_two_servers_with_prefixed_names() {
                 name: "alpha".into(),
                 url: a.uri(),
                 headers: vec![],
+                forward_headers: vec![],
             },
             UpstreamServer {
                 name: "beta".into(),
                 url: b.uri(),
                 headers: vec![],
+                forward_headers: vec![],
             },
         ],
         reqwest::Client::new(),
     );
 
-    let tools = gw.aggregate_tools().await;
+    let tools = gw.aggregate_tools(&[]).await;
     assert_eq!(
         names(&tools),
         vec![
@@ -105,16 +107,18 @@ async fn one_server_erroring_does_not_drop_the_other() {
                 name: "good".into(),
                 url: good.uri(),
                 headers: vec![],
+                forward_headers: vec![],
             },
             UpstreamServer {
                 name: "bad".into(),
                 url: bad.uri(),
                 headers: vec![],
+                forward_headers: vec![],
             },
         ],
         reqwest::Client::new(),
     );
 
-    let tools = gw.aggregate_tools().await;
+    let tools = gw.aggregate_tools(&[]).await;
     assert_eq!(names(&tools), vec!["good-ok".to_string()]);
 }

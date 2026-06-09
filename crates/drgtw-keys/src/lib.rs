@@ -172,6 +172,98 @@ impl RateLimiter {
     }
 }
 
+/// A point-in-time snapshot of a single key's rate-limit state, for UI display.
+#[derive(Debug, Clone)]
+pub struct RateLimiterSnapshot {
+    /// Tokens remaining in the current window (floor of internal f64 counter).
+    pub remaining: u32,
+    /// Maximum tokens (bucket capacity).
+    pub capacity: u32,
+    /// Seconds until the next token is available (0 when tokens > 0).
+    pub secs_to_next_token: u64,
+}
+
+/// A point-in-time snapshot of a single key's budget state, for UI display.
+#[derive(Debug, Clone)]
+pub struct BudgetSnapshot {
+    /// Accumulated spend in the current window, in USD.
+    pub spent_usd: f64,
+    /// Maximum spend for the window, in USD.
+    pub max_usd: f64,
+    /// Seconds until the window resets (0 when no spend has occurred yet).
+    pub secs_to_reset: u64,
+}
+
+impl RateLimiter {
+    /// Build a new limiter from `new_config`, copying live bucket state for keys
+    /// whose **secret** is unchanged between configs.
+    ///
+    /// Match is by secret value (constant-time not required here — both configs
+    /// are trusted operator config, no user input). Keys not present in the old
+    /// config, or keys whose secret changed, start with a full bucket.
+    pub fn rebuild_from(&self, old_config: &drgtw_config::Config, new_config: &drgtw_config::Config) -> Self {
+        let now = (self.now_fn)();
+        let buckets = new_config
+            .virtual_keys
+            .iter()
+            .map(|new_vk| {
+                let Some(rl) = &new_vk.rate_limit else {
+                    return None;
+                };
+                // Find a matching old bucket by secret identity.
+                let old_bucket_state = old_config
+                    .virtual_keys
+                    .iter()
+                    .enumerate()
+                    .find(|(_, old_vk)| old_vk.key == new_vk.key)
+                    .and_then(|(old_idx, _)| self.buckets.get(old_idx))
+                    .and_then(|opt| opt.as_ref())
+                    .map(|mutex| {
+                        let bucket = mutex.lock().expect("bucket mutex poisoned");
+                        (bucket.tokens, bucket.last_refill)
+                    });
+
+                let mut new_bucket = Bucket::new(rl.requests, rl.per_seconds, now);
+                if let Some((tokens, last_refill)) = old_bucket_state {
+                    // Only carry over state when capacity matches.
+                    if new_bucket.capacity == rl.requests {
+                        new_bucket.tokens = tokens.min(new_bucket.capacity as f64);
+                        new_bucket.last_refill = last_refill;
+                    }
+                }
+                Some(Mutex::new(new_bucket))
+            })
+            .collect();
+        RateLimiter { buckets, now_fn: self.now_fn }
+    }
+
+    /// Return a point-in-time snapshot of the rate-limit state for `key_id`.
+    ///
+    /// Returns `None` when the key has no rate limit configured or the key_id
+    /// is unknown. Does NOT consume a token — read-only.
+    pub fn snapshot(&self, key_id: &str) -> Option<RateLimiterSnapshot> {
+        let idx = parse_key_index(key_id)?;
+        let mutex = self.buckets.get(idx)?.as_ref()?;
+        let now = (self.now_fn)();
+        let bucket = mutex.lock().expect("bucket mutex poisoned");
+        let elapsed = now.saturating_duration_since(bucket.last_refill);
+        let refill_rate = 1.0 / bucket.refill_interval.as_secs_f64();
+        let current_tokens = (bucket.tokens + elapsed.as_secs_f64() * refill_rate)
+            .min(bucket.capacity as f64);
+        let secs_to_next_token = if current_tokens >= 1.0 {
+            0
+        } else {
+            let secs = (1.0 - current_tokens) * bucket.refill_interval.as_secs_f64();
+            secs.ceil() as u64
+        };
+        Some(RateLimiterSnapshot {
+            remaining: current_tokens.floor() as u32,
+            capacity: bucket.capacity,
+            secs_to_next_token,
+        })
+    }
+}
+
 /// Parse `"vk-{n}"` → `n`. Returns `None` on malformed input.
 fn parse_key_index(key_id: &str) -> Option<usize> {
     key_id.strip_prefix("vk-")?.parse().ok()
@@ -329,6 +421,75 @@ impl BudgetTracker {
             window.record(cost_usd, now);
         }
     }
+
+    /// Build a new tracker from `new_config`, carrying over live window state for
+    /// keys whose **secret** is unchanged between configs.
+    ///
+    /// A key whose secret (the `vk.key` string) is unchanged keeps its
+    /// `spent_usd` and `window_start`. Keys not found in the old config, or
+    /// keys whose secret changed, start with a fresh empty window.
+    pub fn rebuild_from(&self, old_config: &drgtw_config::Config, new_config: &drgtw_config::Config) -> Self {
+        let now = (self.now_fn)();
+        let windows = new_config
+            .virtual_keys
+            .iter()
+            .map(|new_vk| {
+                let Some(budget) = &new_vk.budget else {
+                    return None;
+                };
+                // Find the old window state for the same secret.
+                let old_window_state = old_config
+                    .virtual_keys
+                    .iter()
+                    .enumerate()
+                    .find(|(_, old_vk)| old_vk.key == new_vk.key)
+                    .and_then(|(old_idx, _)| self.windows.get(old_idx))
+                    .and_then(|opt| opt.as_ref())
+                    .map(|mutex| {
+                        let w = mutex.lock().expect("budget window mutex poisoned");
+                        (w.spent_usd, w.window_start)
+                    });
+
+                let mut new_window = BudgetWindow::new(budget.max_usd, budget.per_seconds);
+                if let Some((spent_usd, window_start)) = old_window_state {
+                    // Only carry over spend if the max_usd matches — a budget
+                    // increase/decrease resets the window so operators see clean state.
+                    if (new_window.max_usd - budget.max_usd).abs() < f64::EPSILON {
+                        new_window.spent_usd = spent_usd;
+                        new_window.window_start = window_start;
+                        // Expire the window if it has already elapsed.
+                        new_window.maybe_reset(now);
+                    }
+                }
+                Some(Mutex::new(new_window))
+            })
+            .collect();
+        BudgetTracker { windows, now_fn: self.now_fn }
+    }
+
+    /// Return a point-in-time snapshot of the budget state for `key_id`.
+    ///
+    /// Returns `None` when the key has no budget configured or the key_id is
+    /// unknown. Does NOT record any spend — read-only.
+    pub fn snapshot(&self, key_id: &str) -> Option<BudgetSnapshot> {
+        let idx = parse_key_index(key_id)?;
+        let mutex = self.windows.get(idx)?.as_ref()?;
+        let now = (self.now_fn)();
+        let mut window = mutex.lock().expect("budget window mutex poisoned");
+        window.maybe_reset(now);
+        let secs_to_reset = match window.window_start {
+            None => 0,
+            Some(start) => {
+                let elapsed = now.saturating_duration_since(start);
+                window.window.saturating_sub(elapsed).as_secs()
+            }
+        };
+        Some(BudgetSnapshot {
+            spent_usd: window.spent_usd,
+            max_usd: window.max_usd,
+            secs_to_reset,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -350,6 +511,8 @@ struct KeyEntry {
     secret: SecretKey,
     connections: Vec<Arc<Connection>>,
     model_allowlist: Option<Vec<String>>,
+    /// Resolved MCP server allowlist: empty = all servers allowed.
+    mcp_servers: Vec<String>,
 }
 
 impl std::fmt::Debug for KeyStore {
@@ -374,6 +537,9 @@ pub struct ResolvedKey {
     pub connections: Vec<Arc<Connection>>,
     /// Optional model allowlist; `None` = all models of allowed connections.
     pub model_allowlist: Option<Vec<String>>,
+    /// Resolved MCP server allowlist. Empty vec = all configured servers allowed.
+    /// Populated from `VirtualKey.mcp_servers`; `None` in config maps to `vec![]`.
+    pub mcp_servers: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -435,6 +601,7 @@ impl KeyStore {
                     secret: SecretKey(vk.key.as_bytes().to_vec()),
                     connections,
                     model_allowlist: vk.models.clone(),
+                    mcp_servers: vk.mcp_servers.clone().unwrap_or_default(),
                 }
             })
             .collect();
@@ -533,6 +700,7 @@ impl KeyStore {
             key_id: entry.key_id.clone(),
             connections: entry.connections.clone(),
             model_allowlist: entry.model_allowlist.clone(),
+            mcp_servers: entry.mcp_servers.clone(),
         })
     }
 }
@@ -727,6 +895,7 @@ mod tests {
             models: models.map(|ms| ms.iter().map(|s| s.to_string()).collect()),
             rate_limit: None,
             budget: None,
+            mcp_servers: None,
         }
     }
 
@@ -746,6 +915,7 @@ mod tests {
                 per_seconds,
             }),
             budget: None,
+            mcp_servers: None,
         }
     }
 
@@ -764,6 +934,7 @@ mod tests {
                 max_usd,
                 per_seconds,
             }),
+            mcp_servers: None,
         }
     }
 
@@ -1847,5 +2018,184 @@ mod tests {
             }
             other => panic!("expected Exhausted, got {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // rebuild_from — RateLimiter
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_rate_limiter_rebuild_surviving_key_keeps_tokens() {
+        // Key "sk-drgtw-key0abc" has rate limit 5/60s.
+        let cfg = make_rate_limit_config(5, 60);
+        let rl = RateLimiter::new(&cfg);
+
+        // Consume 3 tokens.
+        for _ in 0..3 {
+            rl.check("vk-0");
+        }
+        let snap_before = rl.snapshot("vk-0").expect("snapshot present");
+        assert_eq!(snap_before.remaining, 2, "3 consumed → 2 remaining");
+
+        // Rebuild with the same config (same secret).
+        let rl2 = rl.rebuild_from(&cfg, &cfg);
+        let snap_after = rl2.snapshot("vk-0").expect("snapshot present after rebuild");
+        assert_eq!(snap_after.remaining, 2, "surviving key keeps its token count");
+    }
+
+    #[test]
+    fn test_rate_limiter_rebuild_new_key_starts_full() {
+        let old_cfg = make_rate_limit_config(4, 60);
+        let rl = RateLimiter::new(&old_cfg);
+        rl.check("vk-0"); // consume 1 token
+
+        // New config has a different secret — bucket must start full.
+        let new_cfg = Config {
+            virtual_keys: vec![make_virtual_key_with_rate_limit(
+                "sk-drgtw-newkey999",
+                &["conn1"],
+                None,
+                4,
+                60,
+            )],
+            ..old_cfg.clone()
+        };
+        let rl2 = rl.rebuild_from(&old_cfg, &new_cfg);
+        let snap = rl2.snapshot("vk-0").expect("snapshot present");
+        // Full bucket: capacity 4, all tokens available.
+        assert_eq!(snap.capacity, 4);
+        assert_eq!(snap.remaining, 4, "new secret → full bucket");
+    }
+
+    #[test]
+    fn test_rate_limiter_rebuild_reordered_keys_keep_their_own_counters() {
+        // Two keys, consume from vk-0 only.
+        let cfg = Config {
+            connections: vec![make_connection("conn1", &["gpt-4"])],
+            virtual_keys: vec![
+                make_virtual_key_with_rate_limit("sk-drgtw-keyA111", &["conn1"], None, 5, 60),
+                make_virtual_key_with_rate_limit("sk-drgtw-keyB222", &["conn1"], None, 5, 60),
+            ],
+            ..Config::default()
+        };
+        let rl = RateLimiter::new(&cfg);
+        rl.check("vk-0"); // consume from keyA
+        rl.check("vk-0");
+
+        // Rebuild with swapped order — each key must track its own counter.
+        let cfg2 = Config {
+            connections: vec![make_connection("conn1", &["gpt-4"])],
+            virtual_keys: vec![
+                make_virtual_key_with_rate_limit("sk-drgtw-keyB222", &["conn1"], None, 5, 60),
+                make_virtual_key_with_rate_limit("sk-drgtw-keyA111", &["conn1"], None, 5, 60),
+            ],
+            ..Config::default()
+        };
+        let rl2 = rl.rebuild_from(&cfg, &cfg2);
+
+        // vk-0 is now keyB (untouched → full).
+        let snap_b = rl2.snapshot("vk-0").expect("vk-0 (keyB) snapshot");
+        assert_eq!(snap_b.remaining, 5, "keyB had no consumption, must be full");
+
+        // vk-1 is now keyA (2 consumed → 3 remaining).
+        let snap_a = rl2.snapshot("vk-1").expect("vk-1 (keyA) snapshot");
+        assert_eq!(snap_a.remaining, 3, "keyA had 2 consumed, must carry counter");
+    }
+
+    // -----------------------------------------------------------------------
+    // rebuild_from — BudgetTracker
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_budget_tracker_rebuild_surviving_key_keeps_spend() {
+        let cfg = make_budget_config(1.0, 3600);
+        let bt = BudgetTracker::new(&cfg);
+
+        // Record $0.25 spend.
+        bt.record("vk-0", 0.25);
+        let snap_before = bt.snapshot("vk-0").expect("snapshot present");
+        assert!((snap_before.spent_usd - 0.25).abs() < 1e-9, "spent_usd = 0.25");
+
+        // Rebuild with same config (same secret).
+        let bt2 = bt.rebuild_from(&cfg, &cfg);
+        let snap_after = bt2.snapshot("vk-0").expect("snapshot after rebuild");
+        assert!(
+            (snap_after.spent_usd - 0.25).abs() < 1e-9,
+            "surviving key keeps spend: got {}",
+            snap_after.spent_usd
+        );
+    }
+
+    #[test]
+    fn test_budget_tracker_rebuild_new_key_starts_empty() {
+        let old_cfg = make_budget_config(1.0, 3600);
+        let bt = BudgetTracker::new(&old_cfg);
+        bt.record("vk-0", 0.50);
+
+        // Different secret → fresh window.
+        let new_cfg = Config {
+            virtual_keys: vec![make_virtual_key_with_budget(
+                "sk-drgtw-newkey999",
+                &["conn1"],
+                1.0,
+                3600,
+            )],
+            ..old_cfg.clone()
+        };
+        let bt2 = bt.rebuild_from(&old_cfg, &new_cfg);
+        let snap = bt2.snapshot("vk-0").expect("snapshot present");
+        assert!((snap.spent_usd - 0.0).abs() < 1e-9, "new secret → zero spend");
+    }
+
+    #[test]
+    fn test_budget_tracker_rebuild_reordered_keys_keep_their_own_spend() {
+        let cfg = Config {
+            connections: vec![make_connection("conn1", &["gpt-4"])],
+            virtual_keys: vec![
+                make_virtual_key_with_budget("sk-drgtw-keyA111", &["conn1"], 1.0, 3600),
+                make_virtual_key_with_budget("sk-drgtw-keyB222", &["conn1"], 1.0, 3600),
+            ],
+            ..Config::default()
+        };
+        let bt = BudgetTracker::new(&cfg);
+        bt.record("vk-0", 0.30); // spend on keyA only
+
+        // Swap order.
+        let cfg2 = Config {
+            connections: vec![make_connection("conn1", &["gpt-4"])],
+            virtual_keys: vec![
+                make_virtual_key_with_budget("sk-drgtw-keyB222", &["conn1"], 1.0, 3600),
+                make_virtual_key_with_budget("sk-drgtw-keyA111", &["conn1"], 1.0, 3600),
+            ],
+            ..Config::default()
+        };
+        let bt2 = bt.rebuild_from(&cfg, &cfg2);
+
+        // vk-0 is now keyB (no spend).
+        let snap_b = bt2.snapshot("vk-0").expect("keyB snapshot");
+        assert!((snap_b.spent_usd).abs() < 1e-9, "keyB had no spend");
+
+        // vk-1 is now keyA ($0.30 spend carried).
+        let snap_a = bt2.snapshot("vk-1").expect("keyA snapshot");
+        assert!(
+            (snap_a.spent_usd - 0.30).abs() < 1e-9,
+            "keyA spend carried: got {}",
+            snap_a.spent_usd
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ResolvedKey mcp_servers field
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_resolved_key_mcp_servers_none_maps_to_empty_vec() {
+        let cfg = two_key_config();
+        let store = KeyStore::new(&cfg);
+        let rk = store.authenticate(&bearer("sk-drgtw-key0abc")).unwrap();
+        assert!(
+            rk.mcp_servers.is_empty(),
+            "None mcp_servers in VirtualKey → empty vec in ResolvedKey"
+        );
     }
 }

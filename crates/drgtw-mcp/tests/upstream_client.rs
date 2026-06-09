@@ -17,6 +17,7 @@ fn client_for(server: &MockServer) -> UpstreamClient {
             name: "ctx".to_string(),
             url: server.uri(),
             headers: vec![("Authorization".to_string(), "Bearer sekret".to_string())],
+            forward_headers: vec![],
         },
         reqwest::Client::new(),
     )
@@ -74,7 +75,7 @@ async fn handshake_captures_session_and_sends_it_with_auth() {
         .await;
 
     let client = client_for(&server);
-    let tools = client.list_tools().await.expect("list_tools ok");
+    let tools = client.list_tools(&[]).await.expect("list_tools ok");
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0]["name"], "search");
 }
@@ -99,7 +100,7 @@ async fn call_tool_returns_result() {
 
     let client = client_for(&server);
     let result = client
-        .call_tool("echo", json!({ "x": 1 }))
+        .call_tool("echo", json!({ "x": 1 }), &[])
         .await
         .expect("call ok");
     assert_eq!(result["content"][0]["text"], "hi");
@@ -121,7 +122,7 @@ async fn upstream_rpc_error_surfaces_as_rpc() {
         .await;
 
     let client = client_for(&server);
-    let err = client.call_tool("x", json!({})).await.unwrap_err();
+    let err = client.call_tool("x", json!({}), &[]).await.unwrap_err();
     match err {
         UpstreamError::Rpc { code, message } => {
             assert_eq!(code, -32000);
@@ -146,7 +147,7 @@ async fn sse_response_body_is_parsed() {
         .await;
 
     let client = client_for(&server);
-    let tools = client.list_tools().await.expect("sse parsed");
+    let tools = client.list_tools(&[]).await.expect("sse parsed");
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0]["name"], "t");
 }
@@ -188,7 +189,7 @@ async fn http_404_after_session_triggers_reinit_and_retry() {
         .await;
 
     let client = client_for(&server);
-    let tools = client.list_tools().await.expect("retry succeeds");
+    let tools = client.list_tools(&[]).await.expect("retry succeeds");
     assert_eq!(tools[0]["name"], "ok");
 
     // Verify exactly one re-initialize occurred (initialize seen twice total).
@@ -200,6 +201,147 @@ async fn http_404_after_session_triggers_reinit_and_retry() {
         .filter(|r| rpc_method(r).as_deref() == Some("initialize"))
         .count();
     assert_eq!(inits, 2, "expected exactly one re-init after 404");
+}
+
+/// An allowlisted inbound header is forwarded; a non-allowlisted one is not;
+/// protocol headers are never overridden even if listed.
+#[tokio::test]
+async fn forward_headers_allowlisted_sent_non_allowlisted_skipped_protocol_not_overridden() {
+    let server = MockServer::start().await;
+
+    // initialize → accept any POST
+    Mock::given(method("POST"))
+        .and(body_partial_json(json!({ "method": "initialize" })))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("Mcp-Session-Id", "s1")
+                .set_body_json(json!({ "jsonrpc": "2.0", "id": 1, "result": {} })),
+        )
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(body_partial_json(json!({ "method": "notifications/initialized" })))
+        .respond_with(ResponseTemplate::new(202))
+        .mount(&server)
+        .await;
+
+    // tools/list: assert x-trace-id is forwarded AND content-type is not overridden.
+    // We also assert x-secret is absent (not in allowlist).
+    Mock::given(method("POST"))
+        .and(header("x-trace-id", "trace-abc"))
+        // content-type must remain application/json (not attacker-supplied value)
+        .and(header("content-type", "application/json"))
+        .and(body_partial_json(json!({ "method": "tools/list" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0", "id": 2,
+            "result": { "tools": [{ "name": "echo" }] }
+        })))
+        .mount(&server)
+        .await;
+
+    let client = UpstreamClient::new(
+        UpstreamServer {
+            name: "test".to_string(),
+            url: server.uri(),
+            headers: vec![("Authorization".to_string(), "Bearer tok".to_string())],
+            forward_headers: vec!["x-trace-id".to_string()],
+        },
+        reqwest::Client::new(),
+    );
+
+    let inbound = vec![
+        ("x-trace-id".to_string(), "trace-abc".to_string()),
+        ("x-secret".to_string(), "should-not-forward".to_string()),
+        // Attacker tries to override content-type — must be ignored.
+        ("content-type".to_string(), "text/evil".to_string()),
+    ];
+
+    let tools = client.list_tools(&inbound).await.expect("list_tools ok");
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0]["name"], "echo");
+
+    // Verify x-secret was never sent.
+    let reqs = server.received_requests().await.unwrap();
+    let list_req = reqs
+        .iter()
+        .find(|r| {
+            let v: Value = serde_json::from_slice(&r.body).unwrap_or_default();
+            v.get("method").and_then(Value::as_str) == Some("tools/list")
+        })
+        .expect("tools/list request captured");
+
+    assert!(
+        !list_req.headers.contains_key("x-secret"),
+        "x-secret must not be forwarded"
+    );
+    // content-type must be application/json, not the attacker value.
+    let ct = list_req
+        .headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert_eq!(ct, "application/json", "content-type must not be overridden");
+}
+
+/// When forward_headers is empty, no inbound headers are passed through.
+#[tokio::test]
+async fn no_forward_headers_when_allowlist_is_empty() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(body_partial_json(json!({ "method": "initialize" })))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({ "jsonrpc": "2.0", "id": 1, "result": {} })),
+        )
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(body_partial_json(json!({ "method": "notifications/initialized" })))
+        .respond_with(ResponseTemplate::new(202))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(body_partial_json(json!({ "method": "tools/list" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0", "id": 2,
+            "result": { "tools": [] }
+        })))
+        .mount(&server)
+        .await;
+
+    let client = UpstreamClient::new(
+        UpstreamServer {
+            name: "test".to_string(),
+            url: server.uri(),
+            headers: vec![],
+            forward_headers: vec![], // empty allowlist
+        },
+        reqwest::Client::new(),
+    );
+
+    let inbound = vec![("x-trace-id".to_string(), "trace-xyz".to_string())];
+    let tools = client.list_tools(&inbound).await.expect("list_tools ok");
+    assert!(tools.is_empty());
+
+    let reqs = server.received_requests().await.unwrap();
+    let list_req = reqs
+        .iter()
+        .find(|r| {
+            let v: Value = serde_json::from_slice(&r.body).unwrap_or_default();
+            v.get("method").and_then(Value::as_str) == Some("tools/list")
+        })
+        .expect("tools/list captured");
+
+    assert!(
+        !list_req.headers.contains_key("x-trace-id"),
+        "x-trace-id must not be forwarded when allowlist is empty"
+    );
 }
 
 /// Mount the initialize + notifications/initialized handshake responses.

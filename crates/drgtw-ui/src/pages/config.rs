@@ -96,6 +96,19 @@ pub async fn config_save(
         return Html(render_page_with_error(&state, &section, &format!("Write failed: {e}")).into_string());
     }
 
+    // Audit the successful save (best-effort — never blocks/fails the save).
+    if let Some(h) = state.history() {
+        let actor = state.config.ui.auth.as_ref().map(|a| a.username.clone()).unwrap_or_else(|| "admin".to_owned());
+        let entry = drgtw_history::AuditEntry {
+            ts_unix_ms: crate::now_ms(),
+            actor,
+            action: "config.save".to_owned(),
+            target: "drgtw.toml".to_owned(),
+            detail: serde_json::json!({ "sections": [section.clone()] }),
+        };
+        let _ = h.append_audit(&entry).await;
+    }
+
     // Compute which sections require a restart.
     let restart_sections = restart_required_changes(&old_config, &new_config);
 

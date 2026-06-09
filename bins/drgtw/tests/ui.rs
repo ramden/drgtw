@@ -29,8 +29,29 @@ fn load_config(toml: &str) -> Arc<drgtw_config::Config> {
     Arc::new(cfg)
 }
 
+/// A gate that unlocks the full UI without a live database: a `Connected`
+/// variant backed by the no-op disabled history handle. Page-level rendering
+/// (coming.rs) still keys its locked/unlocked state on `config.ui.history`, so
+/// the Postgres-gated page tests behave exactly as before — this only flips the
+/// router out of the WP-B "locked setup page" mode so functional/auth/config
+/// tests exercise the real pages.
+fn connected_gate() -> drgtw_ui::PgGate {
+    drgtw_ui::PgGate::Connected(std::sync::Arc::new(drgtw_history::History::disabled()))
+}
+
 fn router(cfg: Arc<drgtw_config::Config>) -> axum::Router {
-    drgtw::server::router(cfg, std::path::Path::new("."), std::path::PathBuf::new())
+    drgtw::server::router_with_gate(
+        cfg,
+        std::path::Path::new("."),
+        std::path::PathBuf::new(),
+        connected_gate(),
+    )
+    .expect("build router")
+}
+
+/// Build a router with an explicit gate (WP-B locked-mode tests).
+fn router_gated(cfg: Arc<drgtw_config::Config>, gate: drgtw_ui::PgGate) -> axum::Router {
+    drgtw::server::router_with_gate(cfg, std::path::Path::new("."), std::path::PathBuf::new(), gate)
         .expect("build router")
 }
 
@@ -109,35 +130,96 @@ async fn coming_soon_pages_show_badges() {
 }
 
 #[tokio::test]
-async fn postgres_pages_locked_without_history() {
-    // No [ui.history] → analytics/traces/audit render the locked state.
-    for uri in ["/ui/analytics", "/ui/traces", "/ui/audit"] {
+async fn postgres_pages_render_empty_state_without_data() {
+    // WP-C: analytics/traces/audit are now real Postgres-backed pages. With a
+    // connected-but-disabled store (no rows) they must render their own empty
+    // state — 200, never a 500, and not the old "Requires PostgreSQL" lock.
+    let expected_empty = [
+        ("/ui/analytics", "Nothing to chart"),
+        ("/ui/traces", "No request traces yet"),
+        ("/ui/audit", "No audit activity yet"),
+    ];
+    for (uri, marker) in expected_empty {
         let cfg = load_config("[ui]\nenabled = true\n");
         let (status, html) = fetch(router(cfg), uri).await;
-        assert_eq!(status, StatusCode::OK);
+        assert_eq!(status, StatusCode::OK, "{uri}: must be 200");
+        assert!(html.contains(marker), "{uri}: empty-state marker `{marker}` present");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WP-B: router-level gating on the boot-time Postgres connect (PgGate).
+// When no live history store is connected, the UI locks: every path serves the
+// setup page (assets excepted), and the real login/config/dashboard are absent.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn gate_not_configured_locks_all_pages_to_setup() {
+    // ui.enabled = true, but the gate is NotConfigured (no live store). Every
+    // page — index, /login, /config, /analytics — must render the setup page.
+    // (`/ui/` with a trailing slash is not a canonical route under axum's nest:
+    // it 404s even for the connected full router, so the index is tested as
+    // `/ui` only — matching every existing UI test.)
+    for uri in ["/ui", "/ui/login", "/ui/config", "/ui/analytics"] {
+        let cfg = load_config("[ui]\nenabled = true\n");
+        let (status, html) = fetch(router_gated(cfg, drgtw_ui::PgGate::NotConfigured), uri).await;
+        assert_eq!(status, StatusCode::OK, "{uri}: setup page should be 200");
         assert!(
             html.contains("Requires PostgreSQL"),
-            "{uri}: should show the locked Postgres state"
+            "{uri}: setup page title present"
         );
-        assert!(html.contains("[ui.history]"), "{uri}: unlock hint present");
+        assert!(
+            html.contains("${DATABASE_URL}"),
+            "{uri}: DATABASE_URL unlock snippet present"
+        );
+        // The real login form must NOT be served in locked mode.
+        assert!(
+            !html.contains("csrf_token"),
+            "{uri}: real login form must not be served while locked"
+        );
+        assert!(
+            !html.contains("trafficChart"),
+            "{uri}: real dashboard must not be served while locked"
+        );
     }
 }
 
 #[tokio::test]
-async fn postgres_pages_unlock_with_history() {
-    // Presence of [ui.history] flips the locked state to connected.
-    let toml = "[ui]\nenabled = true\n\n[ui.history]\npostgres_url = \"postgres://u:p@db:5432/x\"\n";
-    let cfg = load_config(toml);
-    let (status, html) = fetch(router(cfg), "/ui/analytics").await;
-    assert_eq!(status, StatusCode::OK);
-    // The unlock hint snippet must not appear in the page body when unlocked.
-    assert!(
-        !html.contains("Configure"),
-        "analytics should not show the unlock hint when history is configured"
+async fn gate_not_configured_still_serves_assets() {
+    // CSS/JS must still load so the setup page is styled.
+    let cfg = load_config("[ui]\nenabled = true\n");
+    let app = router_gated(cfg, drgtw_ui::PgGate::NotConfigured);
+    assert_eq!(
+        get(app, "/ui/assets/vendor/app.css").await,
+        StatusCode::OK,
+        "assets must serve in locked mode"
     );
-    assert!(html.contains("Connected"), "shows connected state");
-    // The Postgres password must never leak even on the unlocked page.
-    assert!(!html.contains(":p@"), "postgres password must be masked");
+}
+
+#[tokio::test]
+async fn gate_unreachable_shows_masked_url() {
+    let cfg = load_config("[ui]\nenabled = true\n");
+    let gate = drgtw_ui::PgGate::Unreachable {
+        masked_url: "postgres://user:••••@db:5432/x".to_owned(),
+    };
+    let (status, html) = fetch(router_gated(cfg, gate), "/ui").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("Cannot reach PostgreSQL"), "unreachable title present");
+    assert!(html.contains("postgres://user:••••@db:5432/x"), "masked url shown");
+    // No password leak.
+    assert!(!html.contains(":secret@"), "password must stay masked");
+}
+
+#[tokio::test]
+async fn gate_feature_off_shows_rebuild_hint() {
+    let cfg = load_config("[ui]\nenabled = true\n");
+    let (status, html) = fetch(router_gated(cfg, drgtw_ui::PgGate::FeatureOff), "/ui").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        html.contains("without Postgres support"),
+        "feature-off title present"
+    );
+    assert!(html.contains("default features"), "rebuild hint present");
 }
 
 #[tokio::test]
@@ -309,8 +391,13 @@ fn load_config_with_path(toml: &str) -> (Arc<drgtw_config::Config>, NamedTempFil
 
 /// Build a router wired to a specific config file path (for config-editor tests).
 fn router_with_path(cfg: Arc<drgtw_config::Config>, path: &std::path::Path) -> axum::Router {
-    drgtw::server::router(cfg, std::path::Path::new("."), path.to_path_buf())
-        .expect("build router")
+    drgtw::server::router_with_gate(
+        cfg,
+        std::path::Path::new("."),
+        path.to_path_buf(),
+        connected_gate(),
+    )
+    .expect("build router")
 }
 
 /// POST a form body to a route and return (status, body).
@@ -778,3 +865,199 @@ fn urlenccode(s: &str) -> String {
     }
     out
 }
+
+// ---------------------------------------------------------------------------
+// WP-C: real-data UI pages, backed by a LIVE Postgres history store.
+//
+// These tests are gated on DATABASE_URL (skipped when unset, mirroring
+// drgtw-history's `connect_or_skip`). They connect a real `History`, seed a few
+// usage events + an audit entry through the handle, build a router whose gate is
+// `Connected(<that handle>)`, then assert the seeded data surfaces in the
+// rendered pages and the JSON API.
+// ---------------------------------------------------------------------------
+
+mod wp_c_postgres {
+    use super::*;
+    use drgtw_events::UsageEvent;
+    use drgtw_history::{AuditEntry, History};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn now_ms() -> i64 {
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64
+    }
+
+    async fn connect_or_skip() -> Option<History> {
+        let url = match std::env::var("DATABASE_URL") {
+            Ok(u) if !u.is_empty() => u,
+            _ => {
+                eprintln!("DATABASE_URL not set — skipping WP-C Postgres UI tests");
+                return None;
+            }
+        };
+        match History::connect(&url).await {
+            Ok(h) => Some(h),
+            Err(e) => {
+                eprintln!("Could not connect to Postgres ({e}) — skipping WP-C UI tests");
+                None
+            }
+        }
+    }
+
+    /// A usage event with a unique, recent timestamp so it lands inside the
+    /// dashboard's 24h and analytics' 7d windows.
+    fn seed_event(model: &str, connection: &str, status: u16, latency_ms: u64, pii: bool) -> UsageEvent {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        UsageEvent {
+            request_id: format!("wpc-req-{n}-{}", now_ms()),
+            key_id: "wpc-key".to_owned(),
+            endpoint: "chat_completions".to_owned(),
+            model: model.to_owned(),
+            connection: connection.to_owned(),
+            status,
+            input_tokens: Some(120),
+            output_tokens: Some(80),
+            cost_usd: Some(0.0123),
+            latency_ms,
+            pii,
+            streamed: true,
+            fallback_attempts: 0,
+            ts_unix_ms: now_ms() as u64,
+            metadata: None,
+        }
+    }
+
+    /// Build a router whose gate is `Connected(history)` — exercises the real
+    /// async DB-backed handlers against the live store.
+    fn router_connected(cfg: Arc<drgtw_config::Config>, history: History) -> axum::Router {
+        let gate = drgtw_ui::PgGate::Connected(std::sync::Arc::new(history));
+        router_gated(cfg, gate)
+    }
+
+    #[tokio::test]
+    async fn dashboard_shows_real_hero_numbers_and_recent_rows() {
+        let Some(h) = connect_or_skip().await else { return };
+        // Unique model name so we can find it in the recent-requests table.
+        let model = format!("wpc-model-dash-{}", now_ms());
+        for _ in 0..3 {
+            h.record_usage(&seed_event(&model, "wpc-conn", 200, 410, true))
+                .await
+                .expect("record_usage");
+        }
+        let cfg = load_config("[ui]\nenabled = true\n");
+        let (status, html) = fetch(router_connected(cfg, h), "/ui").await;
+        assert_eq!(status, StatusCode::OK);
+        // Seeded model appears in the recent-requests table.
+        assert!(html.contains(&model), "dashboard recent table should show seeded model");
+        // The traffic series is injected as JSON.
+        assert!(html.contains("window.__traffic"), "dashboard injects server-rendered traffic JSON");
+        // Hero cards are not all the placeholder dash — requests > 0 renders digits.
+        assert!(html.contains("Requests · 24h"), "hero requests card present");
+    }
+
+    #[tokio::test]
+    async fn traces_shows_seeded_request() {
+        let Some(h) = connect_or_skip().await else { return };
+        let model = format!("wpc-model-trace-{}", now_ms());
+        let ev = seed_event(&model, "wpc-conn-trace", 503, 999, false);
+        let rid = ev.request_id.clone();
+        h.record_usage(&ev).await.expect("record_usage");
+        let cfg = load_config("[ui]\nenabled = true\n");
+        let (status, html) = fetch(router_connected(cfg, h), "/ui/traces").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains(&model), "traces table should show the seeded model");
+        // request_id is truncated to its first 10 chars in the table.
+        let short: String = rid.chars().take(10).collect();
+        assert!(html.contains(&short), "traces table should show the truncated request id");
+    }
+
+    #[tokio::test]
+    async fn analytics_shows_breakdowns() {
+        let Some(h) = connect_or_skip().await else { return };
+        let model = format!("wpc-model-an-{}", now_ms());
+        for _ in 0..4 {
+            h.record_usage(&seed_event(&model, "wpc-conn-an", 200, 300, false))
+                .await
+                .expect("record_usage");
+        }
+        let cfg = load_config("[ui]\nenabled = true\n");
+        let (status, html) = fetch(router_connected(cfg, h), "/ui/analytics").await;
+        assert_eq!(status, StatusCode::OK);
+        // The bar-chart payloads are injected as JSON and include the seeded label.
+        assert!(html.contains("window.__byModel"), "analytics injects model breakdown JSON");
+        assert!(html.contains(&model), "analytics should reference the seeded model label");
+        assert!(html.contains("Requests · 7d"), "analytics summary card present");
+    }
+
+    #[tokio::test]
+    async fn audit_shows_seeded_entry() {
+        let Some(h) = connect_or_skip().await else { return };
+        let actor = format!("wpc-actor-{}", now_ms());
+        let entry = AuditEntry {
+            ts_unix_ms: now_ms(),
+            actor: actor.clone(),
+            action: "config.save".to_owned(),
+            target: "drgtw.toml".to_owned(),
+            detail: serde_json::json!({ "sections": ["server"] }),
+        };
+        h.append_audit(&entry).await.expect("append_audit");
+        let cfg = load_config("[ui]\nenabled = true\n");
+        let (status, html) = fetch(router_connected(cfg, h), "/ui/audit").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(html.contains(&actor), "audit table should show the seeded actor");
+        assert!(html.contains("config.save"), "audit table should show the action");
+    }
+
+    #[tokio::test]
+    async fn api_timeseries_returns_json_arrays() {
+        let Some(h) = connect_or_skip().await else { return };
+        h.record_usage(&seed_event("wpc-model-api", "wpc-conn-api", 200, 250, false))
+            .await
+            .expect("record_usage");
+        let cfg = load_config("[ui]\nenabled = true\n");
+        let (status, body) = fetch(router_connected(cfg, h), "/ui/api/timeseries?range=24h").await;
+        assert_eq!(status, StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&body).expect("timeseries API returns JSON");
+        for key in ["labels", "requests", "input_tokens", "output_tokens", "cost_usd", "avg_latency_ms"] {
+            assert!(json.get(key).map(|v| v.is_array()).unwrap_or(false), "key `{key}` is a JSON array");
+        }
+        // With at least one seeded request in the last 24h, the requests array is non-empty.
+        assert!(
+            !json["requests"].as_array().unwrap().is_empty(),
+            "timeseries requests array should have buckets after seeding"
+        );
+    }
+
+    #[tokio::test]
+    async fn login_emits_audit_entry() {
+        let Some(h) = connect_or_skip().await else { return };
+        let session_key = "test-session-key-32bytes-padding!";
+        let username = format!("wpc-login-{}", now_ms());
+        let password = "correct-password";
+        let toml = auth_toml(&username, password, session_key);
+        let cfg = load_config(&toml);
+
+        let csrf = drgtw_ui_auth::csrf::csrf_token(session_key.as_bytes(), &username);
+        let body = format!(
+            "username={u}&password={pw}&csrf_token={csrf}",
+            u = urlenccode(&username),
+            pw = urlenccode(password),
+            csrf = urlenccode(&csrf),
+        );
+        // Hold a clone of the handle to query the audit log after the login.
+        let probe = drgtw_history::History::connect(&std::env::var("DATABASE_URL").unwrap())
+            .await
+            .expect("second connect");
+        let (status, _loc, _cookie) =
+            post_form_redirect(router_connected(cfg, h), "/ui/login", &body).await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "login should redirect on success");
+
+        let rows = probe.recent_audit(50).await.expect("recent_audit");
+        assert!(
+            rows.iter().any(|e| e.actor == username && e.action == "login.success"),
+            "a login.success audit row should exist for the seeded user"
+        );
+    }
+}
+

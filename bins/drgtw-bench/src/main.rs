@@ -226,6 +226,7 @@ fn build_config(mock_base_url: &str, pii_enabled: bool) -> Arc<Config> {
             models: Some(vec!["gpt-4o-mini".into()]),
             rate_limit: None,
             budget: None,
+            mcp_servers: None,
         }],
         pii,
         events: None,

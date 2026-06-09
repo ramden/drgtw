@@ -119,6 +119,7 @@ fn base_config(mcp_servers: HashMap<String, McpServerConfig>) -> Arc<Config> {
             models: Some(vec![]),
             rate_limit: None,
             budget: None,
+            mcp_servers: None,
         }],
         pii: PiiConfig::default(),
         events: None,
@@ -143,6 +144,7 @@ fn config_with_ctx(upstream_url: &str) -> Arc<Config> {
             auth_type: McpAuthType::Bearer,
             auth_value: Some(UPSTREAM_BEARER.to_string()),
             extra_headers: HashMap::new(),
+            forward_headers: vec![],
         },
     );
     base_config(servers)

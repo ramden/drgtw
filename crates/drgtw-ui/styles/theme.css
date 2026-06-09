@@ -191,12 +191,11 @@ code, pre, .mono { font-family: var(--font-mono); }
     color-mix(in oklch, var(--card) 72%, transparent);
 }
 
-/* Hover lift for cards / rows. */
-.lift { transition: transform .18s ease, border-color .18s ease, box-shadow .18s ease; }
+/* Cards: no movement on hover (they aren't clickable) — just a faint border
+   so the surface feels alive without the jump-and-shadow effect. */
+.lift { transition: border-color .18s ease; }
 .lift:hover {
-  transform: translateY(-2px);
-  border-color: oklch(1 0 0 / 16%);
-  box-shadow: 0 2px 4px oklch(0 0 0 / 30%), 0 14px 40px oklch(0 0 0 / 28%);
+  border-color: oklch(1 0 0 / 12%);
 }
 .row-lift { transition: background-color .15s ease; }
 .row-lift:hover { background: oklch(1 0 0 / 4%); }

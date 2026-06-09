@@ -310,16 +310,20 @@ async fn proxy_endpoint(
     req: Request,
     spec: &'static EndpointSpec,
 ) -> Result<Response, ProxyError> {
+    // Load a snapshot of the hot-swappable live bundle once per request.
+    // All per-config fields (keys, limiter, budget, pii, mcp, cost_tables,
+    // config) are accessed via this guard for the lifetime of the request.
+    let live = state.live.load();
     let started = Instant::now();
     let (parts, req_body) = req.into_parts();
 
     // 1. Authenticate from inbound headers. (Auth failures emit no event.)
-    let resolved = state.keys.authenticate(&parts.headers).map_err(ProxyError::from)?;
+    let resolved = live.keys.authenticate(&parts.headers).map_err(ProxyError::from)?;
 
     let request_id = resolve_request_id(&parts.headers);
 
     // 2. Rate-limit check (WP 2.1).
-    let rate_decision = state.limiter.check(&resolved.key_id);
+    let rate_decision = live.limiter.check(&resolved.key_id);
     if let RateDecision::Limited { retry_after_secs, limit } = rate_decision {
         emit_trace_reject(
             &state,
@@ -334,7 +338,7 @@ async fn proxy_endpoint(
 
     // 3. Budget check (WP 8.3): does NOT consume; spend recorded post-response.
     if let BudgetDecision::Exhausted { max_usd, retry_after_secs } =
-        state.budget.check(&resolved.key_id)
+        live.budget.check(&resolved.key_id)
     {
         emit_trace_reject(
             &state,
@@ -350,7 +354,7 @@ async fn proxy_endpoint(
     // 4. Resolve PII mode (WP 3.4).
     let pii_mode = resolve_pii_mode(
         &parts.headers,
-        state.config.pii.enabled_by_default,
+        live.config.pii.enabled_by_default,
         spec.error_fmt,
     )?;
 
@@ -359,7 +363,7 @@ async fn proxy_endpoint(
     let debug = resolve_debug(&parts.headers);
 
     // 5. Buffer body bytes (WP 6.3: enforce max_body_bytes limit).
-    let max = state.config.server.max_body_bytes;
+    let max = live.config.server.max_body_bytes;
     let raw_body: Bytes = match to_bytes(req_body, max).await {
         Ok(b) => b,
         Err(_) => return Err(ProxyError::BodyTooLarge),
@@ -391,7 +395,7 @@ async fn proxy_endpoint(
         .and_then(|v| v.as_str())
         .ok_or(ProxyError::MissingModel)?
         .to_owned();
-    let model = state.config.resolve_model_alias(&requested_model).to_owned();
+    let model = live.config.resolve_model_alias(&requested_model).to_owned();
     let model_rewritten = model != requested_model;
     if model_rewritten
         && let Some(obj) = parsed.as_object_mut()
@@ -416,7 +420,7 @@ async fn proxy_endpoint(
     }
 
     // When fallback is disabled, only the first matching candidate is tried.
-    let candidates: Vec<&Connection> = if state.config.fallback.enabled {
+    let candidates: Vec<&Connection> = if live.config.fallback.enabled {
         matching
     } else {
         vec![matching[0]]
@@ -477,7 +481,7 @@ async fn proxy_endpoint(
     // 9. PII request rewrite (WP 3.4 / 4.4). The pseudonymised bytes are reused
     //    as-is across every fallback attempt (same map — required for restore).
     let (upstream_body, pii_map) = if pii_mode == PiiMode::On {
-        let engine = Arc::clone(&state.pii);
+        let engine = Arc::clone(&live.pii);
         let body_format = spec.body_format;
         let raw_for_fallback = raw_body.clone();
         // WP 9.3: when a persistent vault is configured, build the request map
@@ -655,7 +659,7 @@ async fn proxy_endpoint(
 
         let conn_name = connection.name.clone();
         let conn_format = connection.format;
-        let cost_table = state.cost_tables.get(&conn_name).cloned().unwrap_or_default();
+        let cost_table = live.cost_tables.get(&conn_name).cloned().unwrap_or_default();
 
         // 11. Relay (with PII restore) + capture usage + emit event.
         let ctx = RelayCtx {
@@ -675,6 +679,7 @@ async fn proxy_endpoint(
             metadata: metadata.clone(),
             base_url: connection.base_url.clone(),
             pii_entities: pii_map.len() as u64,
+            pii_map: Arc::clone(&pii_map),
         };
 
         let mut resp = relay_with_usage(
@@ -738,6 +743,10 @@ struct RelayCtx {
     /// Number of PII entities pseudonymized this request (count only — the
     /// entities themselves never reach telemetry).
     pii_entities: u64,
+    /// Per-request entity map. Used by `emit_event` to derive per-kind
+    /// detection counts for `pii_detections` history rows.  Empty when PII
+    /// is off or no entities were found.
+    pii_map: Arc<EntityMap>,
 }
 
 /// Relay an upstream response as an axum response, restoring PII on 2xx JSON
@@ -817,7 +826,7 @@ async fn relay_with_usage(
                 _ => None,
             };
             if let Some(c) = cost {
-                ctx.state.budget.record(&ctx.key_id, c);
+                ctx.state.live.load().budget.record(&ctx.key_id, c);
             }
             let ttft_s = usage.first_chunk_at.map(|t| t.duration_since(ctx.started).as_secs_f64());
             emit_event(&ctx, status_u16, input, output, cost, ttft_s, true);
@@ -892,7 +901,7 @@ async fn relay_with_usage(
         _ => None,
     };
     if let Some(c) = cost {
-        ctx.state.budget.record(&ctx.key_id, c);
+        ctx.state.live.load().budget.record(&ctx.key_id, c);
     }
     emit_event(&ctx, upstream_status.as_u16(), input, output, cost, None, false);
     emit_trace_from_ctx(&ctx, upstream_status.as_u16(), input, output, None);
@@ -1169,6 +1178,43 @@ fn emit_event(
         metadata: ctx.metadata.clone(),
     };
     let _ = ctx.state.usage_broadcast.send(ev.clone());
+    // Fire-and-forget persistence to the admin-UI history store. Spawned so the
+    // database write never adds latency to the response path; `None` (no store
+    // configured) is a cheap branch that records nothing. Errors are ignored —
+    // history is best-effort observability, not part of the request contract.
+    if let Some(history) = &ctx.state.history {
+        let history = Arc::clone(history);
+        let ev = ev.clone();
+        tokio::spawn(async move {
+            let _ = history.record_usage(&ev).await;
+        });
+    }
+    // Fire-and-forget PII detection counts. One row per entity kind per request.
+    // Guarded on pii_flag so the hot path (PII off) is a single branch.
+    if ctx.pii_flag {
+        if let Some(history) = &ctx.state.history {
+            let kind_counts = pii_kind_counts(&ctx.pii_map);
+            if !kind_counts.is_empty() {
+                let history = Arc::clone(history);
+                let request_id = ctx.request_id.clone();
+                let key_id = ctx.key_id.clone();
+                let ts = now_unix_ms() as i64;
+                tokio::spawn(async move {
+                    let rows: Vec<drgtw_history::PiiDetectionRow> = kind_counts
+                        .into_iter()
+                        .map(|(entity_kind, count)| drgtw_history::PiiDetectionRow {
+                            request_id: request_id.clone(),
+                            key_id: key_id.clone(),
+                            entity_kind,
+                            count,
+                            ts_unix_ms: ts,
+                        })
+                        .collect();
+                    let _ = history.record_pii_detections(&rows).await;
+                });
+            }
+        }
+    }
     if let Some(sink) = &ctx.state.events {
         sink.emit(ev);
     }
@@ -1456,6 +1502,26 @@ fn attach_rate_limit_allowed_headers(headers: &mut HeaderMap, remaining: u32, li
     }
 }
 
+/// Count PII detections in `map` by entity kind, for `pii_detections` rows.
+///
+/// Placeholder keys have the form `EMAIL_1`, `PHONE_2`, `IBAN_1`, `CARD_3`,
+/// etc. Strip the trailing `_N` suffix (all trailing `_` + digits) to obtain
+/// the kind prefix. Returns a map of `kind_string → count`.
+fn pii_kind_counts(map: &EntityMap) -> HashMap<String, i32> {
+    let mut counts: HashMap<String, i32> = HashMap::new();
+    for (placeholder, _original) in map.iter() {
+        // Strip trailing `_<digits>` to get the kind prefix.
+        let kind = match placeholder.rfind('_') {
+            Some(idx) if placeholder[idx + 1..].chars().all(|c| c.is_ascii_digit()) => {
+                &placeholder[..idx]
+            }
+            _ => placeholder,
+        };
+        *counts.entry(kind.to_owned()).or_insert(0) += 1;
+    }
+    counts
+}
+
 /// Human-readable format name for error messages.
 fn format_name(fmt: ApiFormat) -> &'static str {
     match fmt {
@@ -1474,8 +1540,9 @@ pub async fn list_models(
     State(state): State<Arc<ProxyState>>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, ProxyError> {
+    let live = state.live.load();
     let started = Instant::now();
-    let resolved = state.keys.authenticate(&headers).map_err(ProxyError::from)?;
+    let resolved = live.keys.authenticate(&headers).map_err(ProxyError::from)?;
     let request_id = resolve_request_id(&headers);
 
     let span = info_span!("list_models", key_id = %resolved.key_id);
@@ -1540,15 +1607,17 @@ async fn embeddings_inner(
     state: Arc<ProxyState>,
     req: Request,
 ) -> Result<Response, ProxyError> {
+    // Load a snapshot of the hot-swappable live bundle once per request.
+    let live = state.live.load();
     let started = Instant::now();
     let (parts, req_body) = req.into_parts();
 
     // 1. Authenticate. (Auth failures emit no event.)
-    let resolved = state.keys.authenticate(&parts.headers).map_err(ProxyError::from)?;
+    let resolved = live.keys.authenticate(&parts.headers).map_err(ProxyError::from)?;
     let request_id = resolve_request_id(&parts.headers);
 
     // 2. Rate-limit.
-    let rate_decision = state.limiter.check(&resolved.key_id);
+    let rate_decision = live.limiter.check(&resolved.key_id);
     if let RateDecision::Limited { retry_after_secs, limit } = rate_decision {
         emit_trace_reject(
             &state,
@@ -1563,7 +1632,7 @@ async fn embeddings_inner(
 
     // 3. Budget (does not consume; spend recorded after the response usage).
     if let BudgetDecision::Exhausted { max_usd, retry_after_secs } =
-        state.budget.check(&resolved.key_id)
+        live.budget.check(&resolved.key_id)
     {
         emit_trace_reject(
             &state,
@@ -1579,12 +1648,12 @@ async fn embeddings_inner(
     // 4. PII mode.
     let pii_mode = resolve_pii_mode(
         &parts.headers,
-        state.config.pii.enabled_by_default,
+        live.config.pii.enabled_by_default,
         ErrorFormat::OpenAi,
     )?;
 
     // 5. Buffer body (enforce max_body_bytes).
-    let max = state.config.server.max_body_bytes;
+    let max = live.config.server.max_body_bytes;
     let raw_body: Bytes = match to_bytes(req_body, max).await {
         Ok(b) => b,
         Err(_) => return Err(ProxyError::BodyTooLarge),
@@ -1612,7 +1681,7 @@ async fn embeddings_inner(
         .and_then(|v| v.as_str())
         .ok_or(ProxyError::MissingModel)?
         .to_owned();
-    let model = state.config.resolve_model_alias(&requested_model).to_owned();
+    let model = live.config.resolve_model_alias(&requested_model).to_owned();
     let model_rewritten = model != requested_model;
     if model_rewritten
         && let Some(obj) = parsed.as_object_mut()
@@ -1634,7 +1703,7 @@ async fn embeddings_inner(
              /v1/embeddings requires open_ai format"
         )));
     }
-    let candidates: Vec<&Connection> = if state.config.fallback.enabled {
+    let candidates: Vec<&Connection> = if live.config.fallback.enabled {
         matching
     } else {
         vec![matching[0]]
@@ -1643,34 +1712,35 @@ async fn embeddings_inner(
     // 8. PII request rewrite (input string/array of strings). Token-id array
     //    inputs are passed through untouched. When a vault is configured the
     //    placeholders are STABLE across requests (the embeddings guarantee).
-    let (upstream_body, pii_used) = if pii_mode == PiiMode::On {
-        let engine = Arc::clone(&state.pii);
+    let (upstream_body, pii_kinds): (Bytes, HashMap<String, i32>) = if pii_mode == PiiMode::On {
+        let engine = Arc::clone(&live.pii);
         let store = state.entity_store.clone();
         let raw_for_fallback = raw_body.clone();
-        let (rewritten, used) = tokio::task::spawn_blocking(move || {
+        let (rewritten, kinds) = tokio::task::spawn_blocking(move || {
             let mut map = match store {
                 Some(s) => EntityMap::with_store(s),
                 None => EntityMap::new(),
             };
             pseudonymize_embeddings_input(&mut parsed, &engine, &mut map)?;
-            let used = !map.is_empty();
-            Ok::<_, drgtw_pii::DetectError>((serde_json::to_vec(&parsed).ok(), used))
+            let kinds = pii_kind_counts(&map);
+            Ok::<_, drgtw_pii::DetectError>((serde_json::to_vec(&parsed).ok(), kinds))
         })
         .await
         .map_err(|e| ProxyError::PiiUnavailable(e.to_string()))?
         .map_err(|e| ProxyError::PiiUnavailable(e.to_string()))?;
         let rewritten = rewritten.unwrap_or_else(|| raw_for_fallback.to_vec());
-        (Bytes::from(rewritten), used)
+        (Bytes::from(rewritten), kinds)
     } else if model_rewritten || body_metadata_stripped {
         // PII off but the body was rewritten (alias resolution and/or the
         // attribution `metadata` strip): re-serialize so the upstream sees
         // the rewritten body.
         let rewritten = serde_json::to_vec(&parsed).unwrap_or_else(|_| raw_body.to_vec());
-        (Bytes::from(rewritten), false)
+        (Bytes::from(rewritten), HashMap::new())
     } else {
         // PII off, no rewrite → byte-identical passthrough.
-        (raw_body, false)
+        (raw_body, HashMap::new())
     };
+    let pii_used = !pii_kinds.is_empty();
 
     let span = info_span!(
         "proxy_request",
@@ -1733,7 +1803,7 @@ async fn embeddings_inner(
         };
 
         let conn_name = connection.name.clone();
-        let cost_table = state.cost_tables.get(&conn_name).cloned().unwrap_or_default();
+        let cost_table = live.cost_tables.get(&conn_name).cloned().unwrap_or_default();
 
         // 10. Relay verbatim (no restore) + capture input-only usage + event.
         let upstream_status = StatusCode::from_u16(upstream_resp.status().as_u16())
@@ -1755,7 +1825,7 @@ async fn embeddings_inner(
         // Cost: input price only (output tokens = 0).
         let cost = input_tokens.and_then(|i| cost_for(&cost_table, &model, i, 0));
         if let Some(c) = cost {
-            state.budget.record(&key_id, c);
+            state.live.load().budget.record(&key_id, c);
         }
 
         let status_u16 = upstream_status.as_u16();
@@ -1822,6 +1892,40 @@ async fn embeddings_inner(
                 metadata: metadata.clone(),
             };
             let _ = state.usage_broadcast.send(ev.clone());
+            // Fire-and-forget persistence to the admin-UI history store (see the
+            // matching block in `emit_event`). Never blocks the response.
+            if let Some(history) = &state.history {
+                let history = Arc::clone(history);
+                let ev = ev.clone();
+                tokio::spawn(async move {
+                    let _ = history.record_usage(&ev).await;
+                });
+            }
+            // Fire-and-forget PII detection counts (one row per kind).
+            if pii_used {
+                if let Some(history) = &state.history {
+                    if !pii_kinds.is_empty() {
+                        let history = Arc::clone(history);
+                        let request_id = request_id.clone();
+                        let key_id = key_id.clone();
+                        let ts = now_unix_ms() as i64;
+                        let kinds = pii_kinds.clone();
+                        tokio::spawn(async move {
+                            let rows: Vec<drgtw_history::PiiDetectionRow> = kinds
+                                .into_iter()
+                                .map(|(entity_kind, count)| drgtw_history::PiiDetectionRow {
+                                    request_id: request_id.clone(),
+                                    key_id: key_id.clone(),
+                                    entity_kind,
+                                    count,
+                                    ts_unix_ms: ts,
+                                })
+                                .collect();
+                            let _ = history.record_pii_detections(&rows).await;
+                        });
+                    }
+                }
+            }
             if let Some(sink) = &state.events {
                 sink.emit(ev);
             }
@@ -1884,4 +1988,65 @@ fn pseudonymize_embeddings_input(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use drgtw_config::PiiConfig;
+    use drgtw_pii::{EntityMap, PiiEngine};
+
+    fn engine_email_phone() -> PiiEngine {
+        drgtw_pii::build_engine_with_ner(&PiiConfig::default(), std::path::Path::new("."))
+            .expect("build PII engine")
+    }
+
+    /// Build a map by pseudonymising a string containing known PII types.
+    fn map_from_text(text: &str) -> EntityMap {
+        let engine = engine_email_phone();
+        let mut map = EntityMap::new();
+        let dets = engine.try_scan(text).expect("scan");
+        map.try_pseudonymize(text, &dets).expect("pseudonymize");
+        map
+    }
+
+    #[test]
+    fn pii_kind_counts_empty_map() {
+        let map = EntityMap::new();
+        let counts = pii_kind_counts(&map);
+        assert!(counts.is_empty(), "empty map → empty counts");
+    }
+
+    #[test]
+    fn pii_kind_counts_single_email() {
+        let map = map_from_text("Contact max.mustermann@example.com please.");
+        let counts = pii_kind_counts(&map);
+        assert_eq!(counts.get("EMAIL").copied(), Some(1), "one EMAIL detected");
+    }
+
+    #[test]
+    fn pii_kind_counts_multiple_kinds() {
+        // Two emails, one phone → EMAIL: 2, PHONE: 1
+        let map = map_from_text(
+            "a@example.com and b@example.com, phone +49 89 1234567",
+        );
+        let counts = pii_kind_counts(&map);
+        assert_eq!(counts.get("EMAIL").copied(), Some(2), "two EMAILs");
+        assert_eq!(counts.get("PHONE").copied(), Some(1), "one PHONE");
+    }
+
+    #[test]
+    fn pii_kind_counts_strips_suffix_correctly() {
+        // Synthesise placeholders like EMAIL_12 (multi-digit suffix).
+        let map = map_from_text(concat!(
+            "a@example.com b@example.com c@example.com ",
+            "d@example.com e@example.com f@example.com ",
+            "g@example.com h@example.com i@example.com ",
+            "j@example.com k@example.com l@example.com",
+        ));
+        let counts = pii_kind_counts(&map);
+        // Should have 12 distinct emails, all counted under EMAIL.
+        assert_eq!(counts.get("EMAIL").copied(), Some(12), "twelve EMAIL entries");
+        assert_eq!(counts.len(), 1, "only EMAIL kind present");
+    }
 }

@@ -69,6 +69,7 @@ hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
 anyhow = "1"
+arc-swap = "1"
 
 # Admin UI: config round-trip editing, password hashing, signed-cookie sessions,
 # optional Postgres history/audit (feature-gated in drgtw-history).

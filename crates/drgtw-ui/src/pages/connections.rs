@@ -20,7 +20,8 @@ pub fn connections(state: &UiState) -> Markup {
                 html! { "Add a " code class="font-mono" { "[[connections]]" } " block to drgtw.toml to route traffic to a provider." }
             ))
         } @else {
-            div class="glass rise overflow-hidden" style="--i:1" {
+            div class="rise grid" style="--i:1" {
+              div class="glass overflow-hidden" {
                 div class="overflow-x-auto" {
                     table class="w-full text-sm" {
                         thead {
@@ -52,12 +53,14 @@ pub fn connections(state: &UiState) -> Markup {
                         }
                     }
                 }
+              }
             }
 
             // Per-connection model chips.
             div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4" {
                 @for (i, conn) in cfg.connections.iter().enumerate() {
-                    div class="glass lift rise p-5" style=(format!("--i:{}", i + 2)) {
+                    div class="rise grid" style=(format!("--i:{}", i + 2)) {
+                      div class="glass lift p-5" {
                         div class="flex items-center justify-between mb-3" {
                             div class="font-medium" { (conn.name) }
                             (badge("ok", "ready"))
@@ -71,6 +74,7 @@ pub fn connections(state: &UiState) -> Markup {
                                 }
                             }
                         }
+                      }
                     }
                 }
             }

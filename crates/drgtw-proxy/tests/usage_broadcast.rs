@@ -60,6 +60,7 @@ fn make_config(upstream_base: &str, events: Option<EventsConfig>) -> Arc<Config>
             models: Some(vec!["gpt-4o".into()]),
             rate_limit: None,
             budget: None,
+            mcp_servers: None,
         }],
         pii: PiiConfig { enabled_by_default: false, ..Default::default() },
         events,
@@ -73,7 +74,7 @@ fn make_config(upstream_base: &str, events: Option<EventsConfig>) -> Arc<Config>
 }
 
 fn events_config(sink_url: String) -> EventsConfig {
-    EventsConfig { url: sink_url, auth_bearer: None, buffer_size: 64, timeout_ms: 5_000 }
+    EventsConfig { url: sink_url, auth_bearer: None, buffer_size: 64, timeout_ms: 5_000, signing_secret: None }
 }
 
 fn chat_request(virtual_key: &str) -> Request<Body> {

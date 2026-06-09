@@ -1,0 +1,44 @@
+# DRGTW end-to-end stack: Postgres history store + the gateway.
+#
+#   docker compose up --build
+#
+# The gateway boots, connects to the `postgres` service over the compose
+# network (DATABASE_URL), unlocks the admin UI, and records usage there.
+# Browse the portal at http://localhost:8080/ui ; the proxy is on :8080 too.
+services:
+  postgres:
+    image: postgres:18.4-alpine
+    environment:
+      POSTGRES_USER: drgtw
+      POSTGRES_PASSWORD: drgtw
+      POSTGRES_DB: drgtw
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U drgtw"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+    volumes:
+      # Postgres 18+ images store data under /var/lib/postgresql (major-version
+      # subdirs) and refuse to boot if a volume sits at the legacy .../data path.
+      - "pgdata:/var/lib/postgresql"
+
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: drgtw:local
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Resolved by the gateway at load time into `[ui.history].postgres_url`.
+      DATABASE_URL: "postgres://drgtw:drgtw@postgres:5432/drgtw"
+    ports:
+      - "8080:8080"
+    volumes:
+      - "./compose-drgtw.toml:/app/drgtw.toml:ro"
+
+volumes:
+  pgdata: {}

@@ -59,6 +59,7 @@ fn events_config(sink_url: String) -> EventsConfig {
         auth_bearer: None,
         buffer_size: 64,
         timeout_ms: 5_000,
+        signing_secret: None,
     }
 }
 
@@ -112,6 +113,7 @@ fn base_config(connection: Connection, virtual_key: &str, sink: &MockServer, pii
             models: None,
             rate_limit: None,
             budget: None,
+            mcp_servers: None,
         }],
         pii,
         events: Some(events_config(format!("{}/events", sink.uri()))),

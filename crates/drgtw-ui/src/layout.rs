@@ -82,7 +82,12 @@ pub fn shell(
                     (sidebar(active, history_unlocked, username))
                     div class="flex-1 min-w-0 flex flex-col" {
                         (header_bar(title, breadcrumb))
-                        main class="flex-1 px-8 py-7 max-w-[1200px] w-full mx-auto" style="view-transition-name:drgtw-main" { (body) }
+                        // `space-y-6` gives every page a consistent vertical
+                        // rhythm between top-level sections/cards, so stacked
+                        // glass cards never sit flush against each other.
+                        main class="flex-1 px-8 py-7 max-w-[1200px] w-full mx-auto" {
+                            div class="space-y-6" { (body) }
+                        }
                     }
                 }
                 script { (PreEscaped(THEME_JS)) }
@@ -102,7 +107,12 @@ fn sidebar(active: Nav, history_unlocked: bool, username: Option<&str>) -> Marku
             // the nav dots/locks). `data-style` then drives only the collapse
             // toggle; its inline width wins over the class and matches the static
             // value when expanded, so there is no width delta to animate at load.
-            class="shrink-0 w-[15.5rem] border-r border-border bg-card/40 backdrop-blur-sm flex flex-col transition-all duration-200"
+            // `sticky top-0 h-screen self-start`: pin the sidebar to the viewport
+            // and bound it to exactly one screen tall. `self-start` stops the flex
+            // row from stretching it to full document height — that bound is what
+            // lets the inner `nav` (flex-1 overflow-y-auto) scroll on its own and
+            // keeps the user footer fixed at the bottom, always visible.
+            class="shrink-0 w-[15.5rem] sticky top-0 h-screen self-start border-r border-border bg-card/40 backdrop-blur-sm flex flex-col transition-all duration-200"
             data-style="{width: $collapsed ? '4.25rem' : '15.5rem'}"
         {
             // Brand mark.
@@ -349,13 +359,15 @@ pub fn badge(kind: &str, label: &str) -> Markup {
 /// Centered empty-state card for "coming soon" / "requires Postgres" pages.
 pub fn empty_state(icon: &str, badge_kind: &str, badge_label: &str, title: &str, body: Markup) -> Markup {
     html! {
-        div class="glass lift rise mx-auto max-w-xl text-center px-8 py-14" style="--i:1" {
+        div class="rise grid mx-auto max-w-xl" style="--i:1" {
+          div class="glass lift text-center px-8 py-14" {
             div class="icon-orb mx-auto size-16 rounded-2xl grid place-items-center text-primary mb-5" {
                 span class="size-7 grid place-items-center" { (PreEscaped(icon)) }
             }
             div class="mb-4" { (badge(badge_kind, badge_label)) }
             h3 class="text-lg font-semibold mb-2" { (title) }
             div class="text-sm text-muted-foreground leading-relaxed" { (body) }
+          }
         }
     }
 }
@@ -371,20 +383,19 @@ const THEME_PREPAINT_JS: &str = "\
     document.documentElement.classList.add('light');\
 }catch(e){}})();";
 
-/// Inlined in `<head>` so it applies before `app.css` arrives. Paints the
-/// document background in the theme colour immediately (no white frame between
-/// page loads) and opts same-origin navigations into a crossfade view
-/// transition (supported browsers; elsewhere it's a no-op instant swap).
+/// Inlined in `<head>` so it applies before `app.css` arrives: paints the
+/// document background in the theme colour immediately, so a navigation never
+/// shows a white UA frame before the stylesheet loads.
+///
+/// NOTE: cross-document View Transitions (`@view-transition{navigation:auto}`)
+/// were removed. They are Chromium-only, and Chromium crossfades the two
+/// page snapshots with opacity — which re-triggers its backdrop-filter bug on
+/// every `.glass` surface, page-wide, producing a stroboscope flicker on each
+/// navigation. Firefox never animated (no support) and was always clean; this
+/// makes Chromium behave the same — instant, flicker-free swap.
 const PREPAINT_CSS: &str = "\
 html{background:oklch(0.145 0.005 285)}\
-html.light{background:oklch(0.99 0.002 285)}\
-@view-transition{navigation:auto}\
-@media (prefers-reduced-motion: no-preference){\
-  ::view-transition-old(drgtw-main){animation:drgtw-vt-out .16s ease both}\
-  ::view-transition-new(drgtw-main){animation:drgtw-vt-in .28s cubic-bezier(.22,.61,.36,1) both}\
-}\
-@keyframes drgtw-vt-out{to{opacity:0;transform:translateY(-6px)}}\
-@keyframes drgtw-vt-in{from{opacity:0;transform:translateY(10px)}}";
+html.light{background:oklch(0.99 0.002 285)}";
 
 const THEME_JS: &str = "\
 (function(){\

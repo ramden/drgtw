@@ -73,6 +73,7 @@ fn events_config(sink_url: String) -> EventsConfig {
         auth_bearer: None,
         buffer_size: 64,
         timeout_ms: 5_000,
+        signing_secret: None,
     }
 }
 
@@ -222,6 +223,7 @@ async fn test_alias_routes_and_forwards_resolved_model() {
             models: None,
             rate_limit: None,
             budget: None,
+            mcp_servers: None,
         }],
         pii: pii_off(),
         events: Some(events_config(format!("{}/events", sink.uri()))),
@@ -281,6 +283,7 @@ async fn test_alias_allowlist_applies_to_resolved_model() {
             models: Some(vec!["gpt-4o-mini".into()]),
             rate_limit: None,
             budget: None,
+            mcp_servers: None,
         }],
         pii: pii_off(),
         events: None,
@@ -323,6 +326,7 @@ async fn test_unaliased_model_untouched() {
             models: None,
             rate_limit: None,
             budget: None,
+            mcp_servers: None,
         }],
         pii: pii_off(),
         events: None,
@@ -367,6 +371,7 @@ fn meta_config(upstream_uri: &str, sink_uri: &str) -> Arc<Config> {
             models: None,
             rate_limit: None,
             budget: None,
+            mcp_servers: None,
         }],
         pii: pii_off(),
         events: Some(events_config(format!("{sink_uri}/events"))),

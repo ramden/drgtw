@@ -68,6 +68,9 @@ COPY crates/drgtw-vault/Cargo.toml   crates/drgtw-vault/Cargo.toml
 COPY crates/drgtw-mcp/Cargo.toml     crates/drgtw-mcp/Cargo.toml
 COPY crates/drgtw-trace/Cargo.toml   crates/drgtw-trace/Cargo.toml
 COPY crates/drgtw-otel/Cargo.toml    crates/drgtw-otel/Cargo.toml
+COPY crates/drgtw-ui/Cargo.toml      crates/drgtw-ui/Cargo.toml
+COPY crates/drgtw-history/Cargo.toml crates/drgtw-history/Cargo.toml
+COPY crates/drgtw-ui-auth/Cargo.toml crates/drgtw-ui-auth/Cargo.toml
 
 RUN set -e; \
     for member in \
@@ -83,6 +86,9 @@ RUN set -e; \
         crates/drgtw-mcp \
         crates/drgtw-trace \
         crates/drgtw-otel \
+        crates/drgtw-ui \
+        crates/drgtw-history \
+        crates/drgtw-ui-auth \
     ; do \
         mkdir -p "$member/src"; \
         printf 'pub fn _stub(){}' > "$member/src/lib.rs"; \
@@ -102,6 +108,15 @@ RUN find target/release/deps \( -name 'drgtw*' -o -name 'libdrgtw*' \) \
 
 # ---------------------------------------------------------------------------
 # Real source build
+#
+# Builds with the DEFAULT feature set (`ui` is on by default — see
+# bins/drgtw/Cargo.toml), which propagates `postgres` into drgtw-history,
+# drgtw-ui, and drgtw-proxy. That compiles in the boot-time Postgres connect
+# and the fire-and-forget usage recording the admin UI relies on. Do NOT add
+# `--no-default-features` here: that drops sqlx and ships a UI-less binary
+# that renders the "built without Postgres support" setup page.
+# sqlx uses tls-rustls (pure Rust) — no libpq / Postgres client lib needed in
+# either the builder or the runtime stage.
 # ---------------------------------------------------------------------------
 COPY bins/    bins/
 COPY crates/  crates/

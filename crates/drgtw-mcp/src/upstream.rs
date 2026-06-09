@@ -27,6 +27,9 @@ pub struct UpstreamServer {
     pub url: String,
     /// Pre-computed static headers (auth / extra) sent on every request.
     pub headers: Vec<(String, String)>,
+    /// Inbound header names (lowercased) that may be forwarded to this server.
+    /// Empty = forward nothing (safe default).
+    pub forward_headers: Vec<String>,
 }
 
 /// Errors surfaced by [`UpstreamClient`] operations.
@@ -100,21 +103,70 @@ impl UpstreamClient {
         req
     }
 
+    /// Apply allowed inbound headers to a request builder.
+    ///
+    /// Only headers whose lowercased name is in `server.forward_headers` are
+    /// applied, and only if they do not collide with protocol / auth headers
+    /// already set (static headers applied afterwards would override anyway, but
+    /// we skip explicitly to keep the intent clear). Protocol names checked:
+    /// `accept`, `content-type`, `mcp-protocol-version`, `mcp-session-id`.
+    fn with_forwarded_headers(
+        &self,
+        mut req: reqwest::RequestBuilder,
+        inbound: &[(String, String)],
+    ) -> reqwest::RequestBuilder {
+        if self.server.forward_headers.is_empty() || inbound.is_empty() {
+            return req;
+        }
+        // Names that must never be overridden by caller-supplied headers.
+        const PROTECTED: &[&str] = &[
+            "accept",
+            "content-type",
+            "mcp-protocol-version",
+            "mcp-session-id",
+        ];
+        // Build a lowercase set of static header names for collision detection.
+        let static_names: std::collections::HashSet<String> = self
+            .server
+            .headers
+            .iter()
+            .map(|(k, _)| k.to_ascii_lowercase())
+            .collect();
+
+        for (name, value) in inbound {
+            let lc = name.to_ascii_lowercase();
+            if !self.server.forward_headers.contains(&lc) {
+                continue;
+            }
+            if PROTECTED.contains(&lc.as_str()) {
+                continue;
+            }
+            if static_names.contains(&lc) {
+                continue;
+            }
+            req = req.header(name.as_str(), value.as_str());
+        }
+        req
+    }
+
     /// Ensure the `initialize` handshake has run, capturing the session id.
     ///
     /// Idempotent: a no-op once the session is initialized.
-    pub async fn ensure_initialized(&self) -> Result<(), UpstreamError> {
+    pub async fn ensure_initialized(
+        &self,
+        inbound: &[(String, String)],
+    ) -> Result<(), UpstreamError> {
         {
             let state = self.session.lock().await;
             if state.initialized {
                 return Ok(());
             }
         }
-        self.initialize().await
+        self.initialize(inbound).await
     }
 
     /// Run the `initialize` request followed by `notifications/initialized`.
-    async fn initialize(&self) -> Result<(), UpstreamError> {
+    async fn initialize(&self, inbound: &[(String, String)]) -> Result<(), UpstreamError> {
         let id = self.next_id();
         let body = json!({
             "jsonrpc": "2.0",
@@ -135,6 +187,7 @@ impl UpstreamClient {
             .header("Accept", "application/json, text/event-stream")
             .header("Content-Type", "application/json")
             .json(&body);
+        let req = self.with_forwarded_headers(req, inbound);
         let req = self.with_static_headers(req);
         let resp = req.send().await?;
 
@@ -161,7 +214,7 @@ impl UpstreamClient {
         }
 
         // Send the initialized notification (no id ⇒ notification).
-        self.send_initialized_notification(session_id).await?;
+        self.send_initialized_notification(session_id, inbound).await?;
         Ok(())
     }
 
@@ -169,6 +222,7 @@ impl UpstreamClient {
     async fn send_initialized_notification(
         &self,
         session_id: Option<String>,
+        inbound: &[(String, String)],
     ) -> Result<(), UpstreamError> {
         let body = json!({
             "jsonrpc": "2.0",
@@ -184,6 +238,7 @@ impl UpstreamClient {
         if let Some(sid) = session_id {
             req = req.header("Mcp-Session-Id", sid);
         }
+        let req = self.with_forwarded_headers(req, inbound);
         let req = self.with_static_headers(req);
         let resp = req.send().await?;
         // Notifications expect 202 (or 200); anything else is a protocol issue,
@@ -198,8 +253,11 @@ impl UpstreamClient {
 
     /// List the tools exposed by this upstream. Returns the `result.tools`
     /// array (each item is a raw tool JSON object).
-    pub async fn list_tools(&self) -> Result<Vec<serde_json::Value>, UpstreamError> {
-        let result = self.request("tools/list", json!({})).await?;
+    pub async fn list_tools(
+        &self,
+        inbound: &[(String, String)],
+    ) -> Result<Vec<serde_json::Value>, UpstreamError> {
+        let result = self.request("tools/list", json!({}), inbound).await?;
         let tools = result
             .get("tools")
             .and_then(|t| t.as_array())
@@ -215,10 +273,12 @@ impl UpstreamClient {
         &self,
         name: &str,
         arguments: serde_json::Value,
+        inbound: &[(String, String)],
     ) -> Result<serde_json::Value, UpstreamError> {
         self.request(
             "tools/call",
             json!({ "name": name, "arguments": arguments }),
+            inbound,
         )
         .await
     }
@@ -229,9 +289,10 @@ impl UpstreamClient {
         &self,
         method: &str,
         params: serde_json::Value,
+        inbound: &[(String, String)],
     ) -> Result<serde_json::Value, UpstreamError> {
-        self.ensure_initialized().await?;
-        match self.request_once(method, &params).await {
+        self.ensure_initialized(inbound).await?;
+        match self.request_once(method, &params, inbound).await {
             Err(UpstreamError::Http { status: 404 }) => {
                 // Session expired: clear it, re-initialize, retry exactly once.
                 {
@@ -239,8 +300,8 @@ impl UpstreamClient {
                     state.initialized = false;
                     state.session_id = None;
                 }
-                self.ensure_initialized().await?;
-                self.request_once(method, &params).await
+                self.ensure_initialized(inbound).await?;
+                self.request_once(method, &params, inbound).await
             }
             other => other,
         }
@@ -251,6 +312,7 @@ impl UpstreamClient {
         &self,
         method: &str,
         params: &serde_json::Value,
+        inbound: &[(String, String)],
     ) -> Result<serde_json::Value, UpstreamError> {
         let id = self.next_id();
         let body = json!({
@@ -272,6 +334,7 @@ impl UpstreamClient {
         if let Some(sid) = session_id {
             req = req.header("Mcp-Session-Id", sid);
         }
+        let req = self.with_forwarded_headers(req, inbound);
         let req = self.with_static_headers(req);
         let resp = req.send().await?;
 

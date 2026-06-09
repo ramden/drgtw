@@ -179,6 +179,10 @@ pub struct VirtualKey {
     /// Optional per-key USD spend budget (WP 8.1).
     #[serde(default)]
     pub budget: Option<Budget>,
+    /// Optional MCP server allowlist for this key. `None` = all configured servers.
+    /// Each entry must name a key in `config.mcp_servers`; validated at load time.
+    #[serde(default)]
+    pub mcp_servers: Option<Vec<String>>,
 }
 
 /// Per-virtual-key token-bucket rate limit configuration.
@@ -380,6 +384,10 @@ pub struct EventsConfig {
     /// Per-request timeout in milliseconds when posting an event. Default 5000. Must be > 0.
     #[serde(default = "default_events_timeout_ms")]
     pub timeout_ms: u64,
+    /// Optional HMAC signing secret for webhook delivery. When set, the sink
+    /// adds a `X-Drgtw-Signature` header to each POST. Supports `${ENV_VAR}`.
+    #[serde(default)]
+    pub signing_secret: Option<String>,
 }
 
 fn default_events_buffer_size() -> usize {
@@ -583,6 +591,11 @@ pub struct McpServerConfig {
     /// `${ENV_VAR}`.
     #[serde(default)]
     pub extra_headers: HashMap<String, String>,
+    /// Inbound request header names (case-insensitive) to forward to this
+    /// upstream. Empty by default — nothing is forwarded (safe default).
+    /// Names are stored lowercased. Example: `["x-trace-id", "x-tenant"]`.
+    #[serde(default)]
+    pub forward_headers: Vec<String>,
 }
 
 /// A user-defined regex recognizer. The regex is compiled by the PII engine
@@ -2831,6 +2844,28 @@ X-Tenant = "good\rbad"
             }
             other => panic!("unexpected: {other}"),
         }
+    }
+
+    #[test]
+    fn test_mcp_servers_forward_headers_parsed_and_defaulted() {
+        // With explicit forward_headers list.
+        let toml = r#"
+[mcp_servers.srv]
+url = "https://mcp.example.com/mcp"
+forward_headers = ["X-Trace-Id", "X-Tenant"]
+"#;
+        let cfg = load_toml(toml).expect("forward_headers parsed");
+        let srv = cfg.mcp_servers.get("srv").unwrap();
+        assert_eq!(srv.forward_headers, vec!["X-Trace-Id", "X-Tenant"]);
+
+        // Default: absent = empty vec.
+        let toml2 = r#"
+[mcp_servers.srv]
+url = "https://mcp.example.com/mcp"
+"#;
+        let cfg2 = load_toml(toml2).expect("forward_headers defaults to empty");
+        let srv2 = cfg2.mcp_servers.get("srv").unwrap();
+        assert!(srv2.forward_headers.is_empty());
     }
 
     // -----------------------------------------------------------------------

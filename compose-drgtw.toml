@@ -1,0 +1,47 @@
+# DRGTW gateway config for the docker-compose stack (compose.yml).
+#
+# Bind-mounted to /app/drgtw.toml in the container. The admin UI is enabled
+# and its history store points at the `postgres` service via ${DATABASE_URL},
+# which compose injects (postgres://drgtw:drgtw@postgres:5432/drgtw). An unset
+# DATABASE_URL is a hard load error — compose always sets it.
+
+[server]
+# Bind on all interfaces INSIDE the container so the published port works.
+bind_addr = "0.0.0.0:8080"
+
+# ---------------------------------------------------------------------------
+# Admin UI + Postgres-backed history store.
+# ---------------------------------------------------------------------------
+[ui]
+enabled = true
+
+[ui.history]
+postgres_url = "${DATABASE_URL}"
+
+# Admin login. Generate a hash with:  drgtw hash-password --password <pw>
+# (here: username "admin", password "drgtw-admin-pw"). Replace both the hash and
+# session_key before any real deployment — session_key signs session/CSRF tokens
+# and also supports "${ENV_VAR}" substitution.
+[ui.auth]
+username = "admin"
+password_hash = "$argon2id$v=19$m=19456,t=2,p=1$985st2ejRZl8vwztD7YlXQ$zvdDS6iQLOAtENSr127LmCB1NgQksTAC1GBFqu6mAQ4"
+session_key = "compose-demo-session-key-change-me-in-production"
+
+# ---------------------------------------------------------------------------
+# One neutral upstream connection (placeholder host — replace with a real
+# provider before sending live traffic).
+# ---------------------------------------------------------------------------
+[[connections]]
+name = "example"
+base_url = "https://api.example.com"
+api_key = "example-upstream-key"
+format = "open_ai"
+models = ["gpt-4o-mini"]
+
+# ---------------------------------------------------------------------------
+# One virtual key the portal authenticates with (must start with sk-drgtw-).
+# ---------------------------------------------------------------------------
+[[virtual_keys]]
+key = "sk-drgtw-compose-key"
+connections = ["example"]
+models = ["gpt-4o-mini"]

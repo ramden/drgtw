@@ -18,6 +18,17 @@
 //! The sink serialises whatever [`UsageEvent`] it receives.  It is the
 //! *caller's* responsibility to ensure no content or secrets are embedded in
 //! the event before calling [`EventSink::emit`].
+//!
+//! ## Signing
+//!
+//! When `signing_secret` is set, each outbound POST body is signed with
+//! HMAC-SHA256 and the header `X-Drgtw-Signature: sha256=<hex>` is appended.
+//!
+//! ## Delivery logging
+//!
+//! When `delivery_log` is set, every POST attempt (success or failure) is
+//! recorded via [`DeliveryLog::record`].  The trait is defined here to avoid a
+//! dependency cycle: `drgtw-events` must not import `drgtw-history`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -31,6 +42,43 @@ use crate::UsageEvent;
 
 /// Interval between repeated "buffer full / drop" warning logs (rate-limit).
 const WARN_INTERVAL: Duration = Duration::from_secs(5);
+
+// ── DeliveryLog trait ─────────────────────────────────────────────────────────
+
+/// A record of one outbound webhook delivery attempt.
+///
+/// Passed to [`DeliveryLog::record`] after every POST attempt.  The
+/// `drgtw-history` crate implements this trait on `History`; other callers can
+/// supply their own implementation for testing or alternative backends.
+#[derive(Debug, Clone)]
+pub struct DeliveryRecord {
+    /// The gateway request id this delivery corresponds to.
+    pub request_id: String,
+    /// Timestamp of the attempt (ms since Unix epoch).
+    pub ts_unix_ms: i64,
+    /// HTTP status code returned by the upstream endpoint, if any.
+    pub status_code: Option<i32>,
+    /// `true` when the delivery was accepted (2xx response).
+    pub ok: bool,
+    /// Transport or serialisation error message, if delivery failed.
+    pub error: Option<String>,
+    /// 1-based attempt number.
+    pub attempt: i32,
+    /// The JSON payload that was sent.
+    pub payload: serde_json::Value,
+}
+
+/// Callback for recording webhook delivery attempts.
+///
+/// Implement this on a type that can persist [`DeliveryRecord`]s.
+/// `drgtw-history::History` implements this trait when the `postgres` feature
+/// is enabled.
+pub trait DeliveryLog: Send + Sync + 'static {
+    fn record(
+        &self,
+        rec: DeliveryRecord,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>;
+}
 
 /// Non-blocking, fire-and-forget webhook sink for [`UsageEvent`]s.
 ///
@@ -53,6 +101,10 @@ impl EventSink {
     /// - `auth_bearer` — if `Some`, adds `Authorization: Bearer <token>` to every request.
     /// - `buffer_size` — capacity of the internal bounded channel (events).
     /// - `timeout_ms` — per-request HTTP timeout in milliseconds.
+    /// - `signing_secret` — if `Some`, computes HMAC-SHA256 of the JSON body and
+    ///   sends `X-Drgtw-Signature: sha256=<hex>` on every request.
+    /// - `delivery_log` — if `Some`, every POST attempt is recorded via
+    ///   [`DeliveryLog::record`] (fire-and-forget; errors are swallowed).
     ///
     /// The caller must be inside a Tokio runtime context (the worker is spawned
     /// with [`tokio::spawn`]).
@@ -61,12 +113,22 @@ impl EventSink {
         auth_bearer: Option<String>,
         buffer_size: usize,
         timeout_ms: u64,
+        signing_secret: Option<String>,
+        delivery_log: Option<Arc<dyn DeliveryLog>>,
     ) -> Self {
         let (tx, rx) = mpsc::channel::<UsageEvent>(buffer_size);
         let dropped = Arc::new(AtomicU64::new(0));
 
         let worker_dropped = Arc::clone(&dropped);
-        tokio::spawn(worker(url, auth_bearer, timeout_ms, rx, worker_dropped));
+        tokio::spawn(worker(
+            url,
+            auth_bearer,
+            timeout_ms,
+            signing_secret,
+            delivery_log,
+            rx,
+            worker_dropped,
+        ));
 
         Self { tx, dropped }
     }
@@ -128,6 +190,8 @@ async fn worker(
     url: String,
     auth_bearer: Option<String>,
     timeout_ms: u64,
+    signing_secret: Option<String>,
+    delivery_log: Option<Arc<dyn DeliveryLog>>,
     mut rx: mpsc::Receiver<UsageEvent>,
     dropped: Arc<AtomicU64>,
 ) {
@@ -142,7 +206,7 @@ async fn worker(
     static LAST_HTTP_WARN_MS: Au64 = Au64::new(0);
 
     while let Some(ev) = rx.recv().await {
-        let body = match serde_json::to_vec(&ev) {
+        let body_bytes = match serde_json::to_vec(&ev) {
             Ok(b) => b,
             Err(e) => {
                 warn!("EventSink: failed to serialise event: {e}");
@@ -151,48 +215,68 @@ async fn worker(
             }
         };
 
+        // Snapshot payload as Value for delivery logging (cheap clone of already-
+        // serialised bytes; avoids a second serde pass in the fast path).
+        let payload_value: serde_json::Value =
+            serde_json::from_slice(&body_bytes).unwrap_or(serde_json::Value::Null);
+
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+
         let mut req = client
             .post(&url)
             .header("Content-Type", "application/json")
-            .body(body);
+            .body(body_bytes.clone());
 
         if let Some(token) = &auth_bearer {
             req = req.header("Authorization", format!("Bearer {token}"));
         }
 
+        // HMAC-SHA256 signing — header: `X-Drgtw-Signature: sha256=<hex>`
+        if let Some(secret) = &signing_secret {
+            use hmac::{Hmac, Mac};
+            use sha2::Sha256;
+            type HmacSha256 = Hmac<Sha256>;
+
+            if let Ok(mut mac) = HmacSha256::new_from_slice(secret.as_bytes()) {
+                mac.update(&body_bytes);
+                let sig = hex::encode(mac.finalize().into_bytes());
+                req = req.header("X-Drgtw-Signature", format!("sha256={sig}"));
+            }
+        }
+
         let result = req.send().await;
 
-        match result {
+        let (status_code, ok, error_msg) = match result {
             Ok(resp) if resp.status().is_success() => {
                 debug!("EventSink: event delivered (status {})", resp.status());
+                (Some(resp.status().as_u16() as i32), true, None)
             }
             Ok(resp) => {
-                let now_ms = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64;
+                let code = resp.status().as_u16() as i32;
+                let now_ms_u64 = now_ms as u64;
                 let last = LAST_HTTP_WARN_MS.load(Ordering::Relaxed);
-                if now_ms.saturating_sub(last) >= WARN_INTERVAL.as_millis() as u64
+                if now_ms_u64.saturating_sub(last) >= WARN_INTERVAL.as_millis() as u64
                     && LAST_HTTP_WARN_MS
-                        .compare_exchange(last, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+                        .compare_exchange(last, now_ms_u64, Ordering::Relaxed, Ordering::Relaxed)
                         .is_ok()
                 {
                     warn!(
                         "EventSink: upstream returned HTTP {} — event dropped (rate-limited warn)",
-                        resp.status()
+                        code
                     );
                 }
                 dropped.fetch_add(1, Ordering::Relaxed);
+                (Some(code), false, None)
             }
             Err(e) => {
-                let now_ms = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64;
+                let now_ms_u64 = now_ms as u64;
                 let last = LAST_HTTP_WARN_MS.load(Ordering::Relaxed);
-                if now_ms.saturating_sub(last) >= WARN_INTERVAL.as_millis() as u64
+                if now_ms_u64.saturating_sub(last) >= WARN_INTERVAL.as_millis() as u64
                     && LAST_HTTP_WARN_MS
-                        .compare_exchange(last, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+                        .compare_exchange(last, now_ms_u64, Ordering::Relaxed, Ordering::Relaxed)
                         .is_ok()
                 {
                     warn!(
@@ -200,7 +284,22 @@ async fn worker(
                     );
                 }
                 dropped.fetch_add(1, Ordering::Relaxed);
+                (None, false, Some(e.to_string()))
             }
+        };
+
+        // Record delivery attempt if a log is wired up (fire-and-forget).
+        if let Some(log) = &delivery_log {
+            let rec = DeliveryRecord {
+                request_id: ev.request_id.clone(),
+                ts_unix_ms: now_ms,
+                status_code,
+                ok,
+                error: error_msg,
+                attempt: 1,
+                payload: payload_value,
+            };
+            log.record(rec).await;
         }
     }
 }
@@ -210,8 +309,9 @@ async fn worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
     use wiremock::matchers::{header, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
     fn sample_event(id: &str) -> UsageEvent {
         UsageEvent {
@@ -233,7 +333,16 @@ mod tests {
         }
     }
 
-    /// Event arrives at mock server with correct Content-Type and Authorization header.
+    /// Captures the raw request body for later inspection.
+    struct BodyCapture(Arc<Mutex<Vec<u8>>>);
+    impl Respond for BodyCapture {
+        fn respond(&self, req: &Request) -> ResponseTemplate {
+            *self.0.lock().unwrap() = req.body.clone();
+            ResponseTemplate::new(200)
+        }
+    }
+
+/// Event arrives at mock server with correct Content-Type and Authorization header.
     #[tokio::test]
     async fn event_arrives_with_auth_header_and_correct_json() {
         let server = MockServer::start().await;
@@ -252,6 +361,8 @@ mod tests {
             Some("secret-token".to_string()),
             64,
             5_000,
+            None,
+            None,
         );
 
         let ev = sample_event("req-001");
@@ -266,18 +377,6 @@ mod tests {
     /// Event JSON body has all expected fields (spot-check `request_id` and `model`).
     #[tokio::test]
     async fn event_json_body_has_expected_fields() {
-        use std::sync::{Arc, Mutex};
-        use wiremock::matchers::method;
-        use wiremock::{Request, Respond, ResponseTemplate};
-
-        struct BodyCapture(Arc<Mutex<Vec<u8>>>);
-        impl Respond for BodyCapture {
-            fn respond(&self, req: &Request) -> ResponseTemplate {
-                *self.0.lock().unwrap() = req.body.clone();
-                ResponseTemplate::new(200)
-            }
-        }
-
         let server = MockServer::start().await;
         let captured: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
 
@@ -286,7 +385,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let sink = EventSink::new(server.uri(), None, 64, 5_000);
+        let sink = EventSink::new(server.uri(), None, 64, 5_000, None, None);
         let ev = sample_event("req-body-check");
         sink.emit(ev);
 
@@ -313,7 +412,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let sink = EventSink::new(server.uri(), None, 1, 5_000);
+        let sink = EventSink::new(server.uri(), None, 1, 5_000, None, None);
 
         // Fire many events synchronously — should never block
         let start = std::time::Instant::now();
@@ -352,7 +451,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let sink = EventSink::new(server.uri(), None, 64, 5_000);
+        let sink = EventSink::new(server.uri(), None, 64, 5_000, None, None);
 
         // First event — hits 500
         sink.emit(sample_event("req-fail"));
@@ -378,9 +477,146 @@ mod tests {
             .mount(&server)
             .await;
 
-        let sink = EventSink::new(server.uri(), None, 64, 5_000);
+        let sink = EventSink::new(server.uri(), None, 64, 5_000, None, None);
         sink.emit(sample_event("req-no-auth"));
         tokio::time::sleep(Duration::from_millis(300)).await;
         server.verify().await;
+    }
+
+    /// When a signing_secret is set, the `X-Drgtw-Signature: sha256=<hex>` header
+    /// is present and its value is a valid HMAC-SHA256 of the JSON body.
+    #[tokio::test]
+    async fn signing_secret_produces_hmac_header() {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        type HmacSha256 = Hmac<Sha256>;
+
+        let secret = "test-signing-secret";
+
+        let server = MockServer::start().await;
+        let captured_hdrs: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_body: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+
+        // Two captures: headers first, then body (both from the same request).
+        // Use BodyCapture for body and HeaderCapture for headers on the same mock.
+        // Simplest approach: a custom Respond that captures both.
+        struct BothCapture {
+            hdrs: Arc<Mutex<Vec<(String, String)>>>,
+            body: Arc<Mutex<Vec<u8>>>,
+        }
+        impl Respond for BothCapture {
+            fn respond(&self, req: &Request) -> ResponseTemplate {
+                *self.body.lock().unwrap() = req.body.clone();
+                let mut h = self.hdrs.lock().unwrap();
+                for (name, value) in req.headers.iter() {
+                    if let Ok(v) = value.to_str() {
+                        h.push((name.as_str().to_owned(), v.to_owned()));
+                    }
+                }
+                ResponseTemplate::new(200)
+            }
+        }
+
+        Mock::given(method("POST"))
+            .respond_with(BothCapture {
+                hdrs: Arc::clone(&captured_hdrs),
+                body: Arc::clone(&captured_body),
+            })
+            .mount(&server)
+            .await;
+
+        let sink = EventSink::new(
+            server.uri(),
+            None,
+            64,
+            5_000,
+            Some(secret.to_owned()),
+            None,
+        );
+        sink.emit(sample_event("req-sign"));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let body = captured_body.lock().unwrap().clone();
+        let hdrs = captured_hdrs.lock().unwrap().clone();
+
+        // Verify signature header is present
+        let sig_hdr = hdrs
+            .iter()
+            .find(|(k, _)| k == "x-drgtw-signature")
+            .expect("X-Drgtw-Signature header must be present");
+        assert!(
+            sig_hdr.1.starts_with("sha256="),
+            "signature header should start with sha256="
+        );
+
+        // Verify the signature is correct
+        let hex_sig = sig_hdr.1.trim_start_matches("sha256=");
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(&body);
+        let expected = hex::encode(mac.finalize().into_bytes());
+        assert_eq!(hex_sig, expected, "HMAC-SHA256 signature mismatch");
+    }
+
+    /// When a DeliveryLog is wired, record() is called after each POST.
+    #[tokio::test]
+    async fn delivery_log_called_on_success_and_failure() {
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        struct TestLog(Mutex<Vec<DeliveryRecord>>);
+
+        impl DeliveryLog for TestLog {
+            fn record(
+                &self,
+                rec: DeliveryRecord,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>
+            {
+                self.0.lock().unwrap().push(rec);
+                Box::pin(async {})
+            }
+        }
+
+        let log = Arc::new(TestLog::default());
+
+        let server = MockServer::start().await;
+
+        // First call → 200
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        // Second call → 503
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+
+        let sink = EventSink::new(
+            server.uri(),
+            None,
+            64,
+            5_000,
+            None,
+            Some(log.clone() as Arc<dyn DeliveryLog>),
+        );
+
+        sink.emit(sample_event("req-log-ok"));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        sink.emit(sample_event("req-log-fail"));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let records = log.0.lock().unwrap();
+        assert_eq!(records.len(), 2, "expected 2 delivery records");
+
+        let ok_rec = records.iter().find(|r| r.request_id == "req-log-ok").unwrap();
+        assert!(ok_rec.ok);
+        assert_eq!(ok_rec.status_code, Some(200));
+
+        let fail_rec = records.iter().find(|r| r.request_id == "req-log-fail").unwrap();
+        assert!(!fail_rec.ok);
+        assert_eq!(fail_rec.status_code, Some(503));
     }
 }

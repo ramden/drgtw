@@ -7,9 +7,29 @@ license.workspace = true
 [dependencies]
 drgtw-config.workspace = true
 drgtw-ui-auth.workspace = true
+# Proxy crate: the hot-reload `Reloader` handle + per-key live snapshot types
+# (RateLimiterSnapshot/BudgetSnapshot) threaded into UiState so config mutations
+# apply live and the Rate Limits / Budgets / key-detail pages read live counters.
+# No cycle: drgtw-proxy does not depend on drgtw-ui.
+drgtw-proxy.workspace = true
+drgtw-keys.workspace = true
+# Usage event type returned by the history store (recent_usage) — read by the
+# dashboard / traces tables.
+drgtw-events.workspace = true
+# Postgres history store. Depended on without the `postgres` feature by default —
+# the no-op disabled handle compiles with zero DB dependency. The bin's `ui`
+# feature turns `postgres` on (see [features]).
+drgtw-history.workspace = true
 
 axum = { workspace = true, features = ["form"] }
 datastar.workspace = true
+# Webhook replay: re-POST a stored delivery payload to the configured event sink
+# (with the HMAC signature + bearer), self-contained in the webhooks page.
+reqwest.workspace = true
+# HMAC-SHA256 signing for webhook replay — mirrors drgtw-events/src/sink.rs.
+hmac.workspace = true
+sha2.workspace = true
+hex.workspace = true
 futures.workspace = true
 maud.workspace = true
 rust-embed.workspace = true
@@ -17,6 +37,11 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 toml_edit.workspace = true
+
+[features]
+# Enable the live Postgres history store (pulls in sqlx via drgtw-history).
+# Off by default so `cargo build`/`cargo test` of this crate alone stay DB-free.
+postgres = ["drgtw-history/postgres"]
 
 [dev-dependencies]
 http-body-util = "0.1"

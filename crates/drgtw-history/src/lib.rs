@@ -13,6 +13,10 @@ pub mod error;
 pub mod handle;
 pub mod types;
 
+// Implements drgtw_events::DeliveryLog for History (bridges events ↔ history
+// without a dependency cycle: events does not import history).
+pub mod delivery_log;
+
 #[cfg(feature = "postgres")]
 pub(crate) mod pg;
 
@@ -22,4 +26,7 @@ mod tests;
 // Re-export the most-used surface so callers can `use drgtw_history::*;`.
 pub use error::HistoryError;
 pub use handle::History;
-pub use types::{AuditEntry, Bucket, UsageBucket, UserRow};
+pub use types::{
+    AuditEntry, Bucket, DimCount, PiiDetectionRow, UsageBucket, UsageSummary, UserRow,
+    WebhookDeliveryRow,
+};
