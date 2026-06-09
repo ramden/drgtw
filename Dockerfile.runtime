@@ -1,0 +1,63 @@
+# syntax=docker/dockerfile:1
+# ---------------------------------------------------------------------------
+# DRGTW — slim runtime image (prebuilt binary)
+#
+# Unlike ./Dockerfile (which compiles from source in a builder stage), this
+# image copies a `drgtw` binary that was ALREADY compiled on the CI runner —
+# see .github/workflows/release.yml. The expensive Rust/ort compile is cached
+# across runs by Swatinem/rust-cache on the runner, so the image build itself
+# is just a few COPYs and finishes in seconds.
+#
+# The from-source ./Dockerfile is still exercised by CI (ci.yml docker job) as
+# a clean-container build sanity check; this file is what releases ship.
+#
+# Build context must provide (staged by the workflow):
+#   dist/drgtw     — release binary for the target arch
+#   dist/lib/      — libonnxruntime*.so* (or just a .keep file if ort linked
+#                    statically — harmless, LD_LIBRARY_PATH still resolves)
+#
+# Base is ubuntu:24.04 (glibc 2.39), matching the 24.04 CI runners the binary
+# is built on. ort 2.x's downloaded ONNX Runtime needs glibc 2.38+, so builder
+# and runtime glibc MUST stay aligned — see ./Dockerfile header for the full
+# rationale. Do not switch this to distroless/cc (glibc 2.36 → link failure).
+# ---------------------------------------------------------------------------
+FROM ubuntu:24.04 AS runtime
+
+# ca-certificates: required for outbound TLS to LLM providers.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Non-root service user.
+RUN useradd -r -u 1001 -m -s /usr/sbin/nologin drgtw
+
+WORKDIR /app
+
+# Prebuilt gateway binary + ONNX Runtime shared library.
+COPY dist/drgtw /usr/local/bin/drgtw
+COPY dist/lib/ /app/lib/
+
+# Add /app/lib to the dynamic linker search path.
+ENV LD_LIBRARY_PATH=/app/lib
+
+# Fix ownership.
+RUN chown -R drgtw:drgtw /app && chmod 755 /usr/local/bin/drgtw
+
+USER drgtw
+
+# Volumes:
+#   /app/drgtw.toml  — configuration file  (bind-mount from host)
+#   /app/models      — optional NER model directory
+#   /app/data        — optional SQLite vault storage
+VOLUME ["/app/models", "/app/data"]
+
+EXPOSE 8080
+
+# OCI image labels.
+LABEL org.opencontainers.image.title="drgtw" \
+      org.opencontainers.image.description="Privacy-first LLM gateway — pseudonymizes PII before forwarding to OpenAI/Anthropic providers" \
+      org.opencontainers.image.source="https://github.com/ramden/drgtw" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
+ENTRYPOINT ["drgtw"]
+CMD ["--config", "/app/drgtw.toml"]

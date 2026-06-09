@@ -9,18 +9,81 @@ env:
   CARGO_TERM_COLOR: always
   IMAGE_NAME: drgtw
 
+# ---------------------------------------------------------------------------
+# Multi-arch release without QEMU, with a cached native compile.
+#
+# Each architecture is built on its own NATIVE runner in parallel
+# (amd64 on ubuntu-latest, arm64 on ubuntu-24.04-arm — the arm64 runner is
+# free for public repos). This replaces the previous single QEMU-emulated
+# build, where the arm64 leg (rustc + ort's ONNX Runtime) ran under x86->arm64
+# emulation and dominated release time.
+#
+# Per arch the flow is: compile the release binary on the runner (the slow
+# rustc/ort step, cached by Swatinem/rust-cache across runs) -> stage binary +
+# libonnxruntime.so into ./dist -> build the slim Dockerfile.runtime (just
+# COPYs, seconds) -> push BY DIGEST. The `merge` job then stitches both digests
+# into one tagged multi-platform manifest.
+#
+# Builder runners and Dockerfile.runtime are all ubuntu 24.04 (glibc 2.39), so
+# the binary + ort's downloaded ONNX Runtime link correctly at run time.
+# ---------------------------------------------------------------------------
 jobs:
-  docker-push:
-    name: Build and push to Docker Hub
-    runs-on: ubuntu-latest
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
 
     steps:
       - uses: actions/checkout@v4
 
-      # QEMU provides the emulation needed to build the linux/arm64 image on
-      # the amd64 GitHub runner. Must run before buildx.
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      # PLATFORM_PAIR = "linux-amd64" / "linux-arm64" — used as the rust-cache
+      # key and the digest artifact name (slashes aren't allowed there).
+      - name: Prepare platform pair
+        run: echo "PLATFORM_PAIR=${platform//\//-}" >> "$GITHUB_ENV"
+        env:
+          platform: ${{ matrix.platform }}
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      # Caches the cargo registry + target dir keyed per arch. This is the win
+      # over Docker's type=gha layer cache: incremental Rust rebuilds reuse it.
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ env.PLATFORM_PAIR }}
+
+      # Mostly present on GH runners already; installed explicitly so the build
+      # doesn't silently break on runner-image drift. (clang/cmake: tokenizers'
+      # onig binding; libssl-dev/pkg-config: transitively pulled crates.)
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libssl-dev cmake clang
+
+      # Default features (ui -> postgres) on purpose — see ./Dockerfile header;
+      # do NOT add --no-default-features (ships a UI-less, Postgres-less build).
+      - name: Build release binary
+        run: cargo build --release -p drgtw
+
+      - name: Stage binary + ONNX Runtime libs
+        run: |
+          mkdir -p dist/lib
+          cp target/release/drgtw dist/drgtw
+          # ort ships a shared lib on linux; copy it (none if statically linked).
+          find target/release -maxdepth 1 -name 'libonnxruntime*.so*' \
+            -exec cp -av {} dist/lib/ \;
+          # Guarantee dist/lib exists for the COPY even if ort linked statically.
+          touch dist/lib/.keep
+          ls -l dist dist/lib
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -31,7 +94,65 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Extract metadata (tags, labels)
+      # Labels only here; tags are applied once, on the merged manifest.
+      - name: Extract metadata (labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
+
+      # Build the slim prebuilt-binary image and push it by digest (no tag).
+      # No layer cache needed — the image is just COPYs; the costly compile is
+      # already cached by rust-cache above.
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.runtime
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+
+      # Write the digest to an empty file named after it; the merge job globs
+      # these to reconstruct the `image@sha256:...` references.
+      - name: Export digest
+        run: |
+          mkdir -p "${{ runner.temp }}/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: Merge manifest and push tags
+    runs-on: ubuntu-latest
+    needs: build
+
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract metadata (tags)
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -41,18 +162,16 @@ jobs:
             # only stable releases (no -alpha/-rc suffix) move `latest`
             type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
 
-      # Multi-arch build. The arm64 image is built under QEMU emulation on the
-      # amd64 runner; a release build (rustc + ort's ONNX Runtime download) is
-      # CPU-bound, so the arm64 leg can take significantly longer than amd64.
-      # A single build-push-action invocation produces a multi-platform
-      # manifest; shared GHA cache (mode=max) is keyed per-platform internally.
-      - name: Build and push image (amd64 + arm64)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      # Assemble one multi-platform manifest from the per-arch digests and
+      # tag it with every tag metadata-action produced.
+      - name: Create manifest list and push
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
+
+      - name: Inspect manifest
+        run: |
+          docker buildx imagetools inspect \
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
