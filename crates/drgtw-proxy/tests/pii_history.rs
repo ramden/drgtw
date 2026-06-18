@@ -171,7 +171,7 @@ async fn event_sink_adds_signature_header_when_secret_set() {
     let resp = app.oneshot(chat_request("sk-drgtw-signtest01")).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    poll_until(|| captured.lock().unwrap().len() >= 1).await;
+    poll_until(|| !captured.lock().unwrap().is_empty()).await;
 
     let reqs = captured.lock().unwrap().clone();
     assert!(!reqs.is_empty(), "event sink received at least one POST");
@@ -248,7 +248,7 @@ async fn event_sink_no_signature_header_when_secret_absent() {
     let resp = app.oneshot(chat_request("sk-drgtw-nosigtest01")).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    poll_until(|| captured.lock().unwrap().len() >= 1).await;
+    poll_until(|| !captured.lock().unwrap().is_empty()).await;
 
     let reqs = captured.lock().unwrap().clone();
     assert!(!reqs.is_empty(), "event sink received at least one POST");
@@ -341,7 +341,7 @@ async fn pii_request_sets_pii_flag_in_usage_event() {
     let resp = app.oneshot(chat_request_with_pii("sk-drgtw-piihistory01")).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    poll_until(|| captured.lock().unwrap().len() >= 1).await;
+    poll_until(|| !captured.lock().unwrap().is_empty()).await;
 
     let events = captured.lock().unwrap().clone();
     assert!(!events.is_empty(), "event sink received at least one event");
@@ -406,7 +406,7 @@ async fn non_pii_request_pii_flag_false() {
     let resp = app.oneshot(chat_request("sk-drgtw-nopii01")).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    poll_until(|| captured.lock().unwrap().len() >= 1).await;
+    poll_until(|| !captured.lock().unwrap().is_empty()).await;
 
     let events = captured.lock().unwrap().clone();
     assert!(!events.is_empty(), "event sink received at least one event");

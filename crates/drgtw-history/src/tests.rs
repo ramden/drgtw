@@ -701,7 +701,7 @@ mod pg_integration {
             .expect("get_webhook_delivery")
             .expect("should exist");
         assert_eq!(fetched.request_id, row.request_id);
-        assert_eq!(fetched.ok, true);
+        assert!(fetched.ok);
         assert_eq!(fetched.status_code, Some(200));
         assert_eq!(fetched.attempt, 1);
         assert_eq!(fetched.id, Some(id));

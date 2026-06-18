@@ -275,8 +275,10 @@ mod tests {
             session_key: "test-session-key-32-bytes-padding!".into(),
             session_ttl_hours: 8,
         };
-        let mut config = Config::default();
-        config.ui = UiConfig { auth: Some(auth), ..UiConfig::default() };
+        let mut config = Config {
+            ui: UiConfig { auth: Some(auth), ..UiConfig::default() },
+            ..Config::default()
+        };
         config.ui.history = Some(drgtw_config::UiHistoryConfig {
             postgres_url: "postgres://localhost/test".into(),
         });

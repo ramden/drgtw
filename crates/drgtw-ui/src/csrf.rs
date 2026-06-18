@@ -63,8 +63,10 @@ mod tests {
             session_key: "test-session-key-32-bytes-padding!".into(),
             session_ttl_hours: 8,
         };
-        let mut config = Config::default();
-        config.ui = UiConfig { auth: Some(auth), ..UiConfig::default() };
+        let config = Config {
+            ui: UiConfig { auth: Some(auth), ..UiConfig::default() },
+            ..Config::default()
+        };
         UiState::new(Instant::now(), Arc::new(config), PathBuf::new(), PgGate::NotConfigured)
     }
 

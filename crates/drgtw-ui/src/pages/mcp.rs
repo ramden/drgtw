@@ -400,8 +400,7 @@ mod tests {
                 forward_headers: vec!["x-trace-id".to_string(), "x-tenant".to_string()],
             },
         );
-        let mut cfg = drgtw_config::Config::default();
-        cfg.mcp_servers = mcp_servers;
+        let cfg = drgtw_config::Config { mcp_servers, ..Default::default() };
         let state = UiState::new(
             Instant::now(),
             Arc::new(cfg),
@@ -436,8 +435,7 @@ mod tests {
                 forward_headers: vec![],
             },
         );
-        let mut cfg = drgtw_config::Config::default();
-        cfg.mcp_servers = mcp_servers;
+        let cfg = drgtw_config::Config { mcp_servers, ..Default::default() };
         let state = UiState::new(
             Instant::now(),
             Arc::new(cfg),

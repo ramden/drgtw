@@ -925,7 +925,7 @@ checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 
 [[package]]
 name = "drgtw"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "axum",
  "bytes",
@@ -951,7 +951,7 @@ dependencies = [
 
 [[package]]
 name = "drgtw-bench"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "axum",
  "clap",
@@ -969,7 +969,7 @@ dependencies = [
 
 [[package]]
 name = "drgtw-config"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "serde",
  "tempfile",
@@ -981,7 +981,7 @@ dependencies = [
 
 [[package]]
 name = "drgtw-events"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "hex",
  "hmac 0.12.1",
@@ -997,7 +997,7 @@ dependencies = [
 
 [[package]]
 name = "drgtw-history"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "drgtw-events",
  "serde",
@@ -1010,7 +1010,7 @@ dependencies = [
 
 [[package]]
 name = "drgtw-keys"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "drgtw-config",
  "http 1.4.1",
@@ -1020,7 +1020,7 @@ dependencies = [
 
 [[package]]
 name = "drgtw-mcp"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "futures",
  "reqwest 0.12.28",
@@ -1035,7 +1035,7 @@ dependencies = [
 
 [[package]]
 name = "drgtw-ner"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "ndarray 0.16.1",
  "ort",
@@ -1048,7 +1048,7 @@ dependencies = [
 
 [[package]]
 name = "drgtw-otel"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "anyhow",
  "drgtw-config",
@@ -1068,7 +1068,7 @@ dependencies = [
 
 [[package]]
 name = "drgtw-pii"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "drgtw-config",
  "drgtw-ner",
@@ -1083,7 +1083,7 @@ dependencies = [
 
 [[package]]
 name = "drgtw-proxy"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "arc-swap",
  "aws-credential-types",
@@ -1123,7 +1123,7 @@ dependencies = [
 
 [[package]]
 name = "drgtw-trace"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "filetime",
  "flate2",
@@ -1137,7 +1137,7 @@ dependencies = [
 
 [[package]]
 name = "drgtw-ui"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "axum",
  "datastar",
@@ -1165,7 +1165,7 @@ dependencies = [
 
 [[package]]
 name = "drgtw-ui-auth"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -1178,7 +1178,7 @@ dependencies = [
 
 [[package]]
 name = "drgtw-vault"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "aes-gcm",
  "hex",

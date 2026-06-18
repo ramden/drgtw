@@ -1279,7 +1279,7 @@ url = "https://mcp.example.com/docs"
 
         // mcp_servers must be on the key, not silently dropped or misattributed.
         assert_eq!(
-            vk.mcp_servers.as_ref().map(|v| v.as_slice()),
+            vk.mcp_servers.as_deref(),
             Some(["docs".to_string()].as_slice()),
             "mcp_servers missing or wrong after round-trip; generated TOML:\n{toml}"
         );

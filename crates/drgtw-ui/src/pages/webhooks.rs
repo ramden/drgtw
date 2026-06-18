@@ -373,14 +373,16 @@ mod tests {
     #[test]
     fn webhooks_page_shows_events_config_when_present() {
         use drgtw_config::{Config, EventsConfig};
-        let mut config = Config::default();
-        config.events = Some(EventsConfig {
-            url: "https://sink.example.com/events".into(),
-            auth_bearer: None,
-            buffer_size: 1024,
-            timeout_ms: 5000,
-            signing_secret: Some("my-signing-secret".into()),
-        });
+        let config = Config {
+            events: Some(EventsConfig {
+                url: "https://sink.example.com/events".into(),
+                auth_bearer: None,
+                buffer_size: 1024,
+                timeout_ms: 5000,
+                signing_secret: Some("my-signing-secret".into()),
+            }),
+            ..Default::default()
+        };
         let state = UiState::new(Instant::now(), Arc::new(config), PathBuf::new(), PgGate::NotConfigured);
         let html = super::render(&state, None, &[]).into_string();
         assert!(html.contains("sink.example.com"), "event sink URL must appear");

@@ -161,6 +161,21 @@ pub(crate) fn timeseries_json(buckets: &[UsageBucket], bucket: Bucket) -> serde_
     })
 }
 
+/// Axis label for one bucket: `HH:00` for hourly, `MM-DD` for daily.
+fn fmt_bucket_label(ts_ms: i64, bucket: Bucket) -> String {
+    let secs = ts_ms.div_euclid(1000);
+    match bucket {
+        Bucket::Hour => {
+            let h = secs.rem_euclid(86_400) / 3600;
+            format!("{h:02}:00")
+        }
+        Bucket::Day => {
+            let (_, mo, d) = civil_from_days(secs.div_euclid(86_400));
+            format!("{mo:02}-{d:02}")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,20 +212,5 @@ mod tests {
         let json = timeseries_json(&[], Bucket::Day);
         assert_eq!(json["x"].as_array().unwrap().len(), 0);
         assert_eq!(json["requests"].as_array().unwrap().len(), 0);
-    }
-}
-
-/// Axis label for one bucket: `HH:00` for hourly, `MM-DD` for daily.
-fn fmt_bucket_label(ts_ms: i64, bucket: Bucket) -> String {
-    let secs = ts_ms.div_euclid(1000);
-    match bucket {
-        Bucket::Hour => {
-            let h = secs.rem_euclid(86_400) / 3600;
-            format!("{h:02}:00")
-        }
-        Bucket::Day => {
-            let (_, mo, d) = civil_from_days(secs.div_euclid(86_400));
-            format!("{mo:02}-{d:02}")
-        }
     }
 }
