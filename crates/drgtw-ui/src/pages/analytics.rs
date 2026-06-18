@@ -2,8 +2,8 @@
 //!
 //! Async handler. Pulls a 7d/Day window: a summary, a timeseries (rendered into
 //! `window.__analytics` for the multi-series line chart), and top
-//! model/connection/endpoint breakdowns (bar charts). Each canvas gets its own
-//! Chart.js init that reuses the theme-resolve pattern from the dashboard.
+//! model/connection/endpoint breakdowns (bar charts). Charts rendered with uPlot
+//! (vendored IIFE); each chart injects its own canvas into a sized container div.
 
 use axum::extract::State;
 use axum::response::Html;
@@ -107,7 +107,7 @@ fn render(
               div class="glass lift p-5" {
                 h3 class="text-base font-semibold mb-1" { "Trends" }
                 p class="text-xs text-muted-foreground mb-4" { "Requests, tokens, and cost per day" }
-                div class="relative h-[300px]" { canvas id="trendChart" {} }
+                div id="trendChart" class="h-[300px]" {}
               }
             }
 
@@ -147,14 +147,14 @@ fn stat_card(i: usize, label: &str, value: &str) -> Markup {
     }
 }
 
-fn bar_card(i: usize, title: &str, canvas_id: &str) -> Markup {
+fn bar_card(i: usize, title: &str, chart_id: &str) -> Markup {
     html! {
-        // `min-w-0` lets the grid item shrink below the canvas's intrinsic width
+        // `min-w-0` lets the grid item shrink below the chart's intrinsic width
         // so the 3-up breakdown row reflows instead of overflowing horizontally.
         div class="rise grid min-w-0" style=(format!("--i:{i}")) {
           div class="glass lift p-5 min-w-0" {
             h3 class="text-sm font-semibold mb-3" { (title) }
-            div class="relative h-[260px] min-w-0" { canvas id=(canvas_id) {} }
+            div id=(chart_id) class="h-[260px] min-w-0" {}
           }
         }
     }
@@ -162,8 +162,18 @@ fn bar_card(i: usize, title: &str, canvas_id: &str) -> Markup {
 
 const ANALYTICS_JS: &str = r##"
 (function () {
-  if (typeof Chart === 'undefined') return;
+  if (typeof uPlot === 'undefined') return;
 
+  // pjax teardown bookkeeping: client-side nav removes this DOM, so collect
+  // every uPlot instance + ResizeObserver and destroy them on the next swap.
+  var cleanup = window.__drgtwCleanup || (window.__drgtwCleanup = []);
+  var charts = [], observers = [];
+  cleanup.push(function () {
+    charts.forEach(function (c) { try { c.destroy(); } catch (e) {} });
+    observers.forEach(function (o) { o.disconnect(); });
+  });
+
+  // ── theme helpers ──────────────────────────────────────────────────────────
   function cssVar(name) {
     return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   }
@@ -183,84 +193,108 @@ const ANALYTICS_JS: &str = r##"
     return 'rgba(' + m[0] + ',' + m[1] + ',' + m[2] + ',' + a + ')';
   }
 
-  var charts = [];
-  function destroyAll() { charts.forEach(function (c) { c.destroy(); }); charts = []; }
+  var accent = resolve(cssVar('--primary'));
+  var ok     = resolve(cssVar('--ok'));
+  var warn   = resolve(cssVar('--warn'));
+  var grid   = rgba(resolve(cssVar('--foreground')), 0.07);
+  var tick   = rgba(resolve(cssVar('--muted-foreground')), 0.9);
 
-  function commonScales(tick, grid) {
-    return {
-      x: { grid: { display: false }, ticks: { color: tick, font: { size: 11 }, maxTicksLimit: 8 }, border: { display: false } },
-      y: { grid: { color: grid }, ticks: { color: tick, font: { size: 11 }, callback: function (v) { return v >= 1000 ? (v / 1000) + 'k' : v; } }, border: { display: false } }
+  // y value formatter: 1000 → '1k'
+  function fmtK(u, v) { return v == null ? '' : (Math.abs(v) >= 1000 ? (v / 1000).toFixed(0) + 'k' : String(v)); }
+
+  // shared axis config pieces
+  function xAxis(extra) {
+    return Object.assign({ stroke: tick, ticks: { stroke: tick }, grid: { show: false }, size: 30, font: '11px sans-serif' }, extra || {});
+  }
+  function yAxis(extra) {
+    return Object.assign({ stroke: tick, ticks: { stroke: tick }, grid: { stroke: grid, width: 1 }, size: 52, font: '11px sans-serif', values: fmtK }, extra || {});
+  }
+
+  // ── Trend chart (multi-series line, dual y scale) ──────────────────────────
+  var a = window.__analytics || {};
+  var trendEl = document.getElementById('trendChart');
+  if (trendEl && a.x && a.x.length > 0) {
+    var tokens = (a.input_tokens || []).map(function (v, i) { return (v || 0) + ((a.output_tokens || [])[i] || 0); });
+
+    var trendOpts = {
+      width:  trendEl.clientWidth  || 600,
+      height: 300,
+      legend: { show: true },
+      scales: {
+        x:    { time: true },
+        y:    {},
+        cost: {}
+      },
+      axes: [
+        xAxis(),
+        yAxis(),
+        // right-side cost axis
+        yAxis({ scale: 'cost', side: 1, size: 64, values: function (u, vals) { return vals.map(function (v) { return v == null ? '' : '$' + v.toFixed(2); }); } })
+      ],
+      series: [
+        {},
+        { label: 'Requests', stroke: accent, width: 2, points: { show: false } },
+        { label: 'Tokens',   stroke: ok,     width: 2, points: { show: false } },
+        { label: 'Cost USD', stroke: warn,   width: 2, points: { show: false }, scale: 'cost' }
+      ]
     };
+
+    var trendData = [ a.x, a.requests || [], tokens, a.cost_usd || [] ];
+    var trendChart = new uPlot(trendOpts, trendData, trendEl);
+    charts.push(trendChart);
+
+    var tro = new ResizeObserver(function () {
+      trendChart.setSize({ width: trendEl.clientWidth || 600, height: 300 });
+    });
+    tro.observe(trendEl);
+    observers.push(tro);
   }
 
-  function buildAll() {
-    var accent = resolve(cssVar('--primary') || '#7c5cff');
-    var ok = resolve(cssVar('--ok') || '#22c55e');
-    var warn = resolve(cssVar('--warn') || '#f59e0b');
-    var grid = rgba(resolve(cssVar('--foreground') || '#fff'), 0.08);
-    var tick = rgba(resolve(cssVar('--muted-foreground') || '#aaa'), 0.95);
+  // ── Breakdown bar charts ───────────────────────────────────────────────────
+  function bar(id, payload) {
+    if (!payload || !payload.labels || payload.labels.length === 0) return;
+    var el = document.getElementById(id);
+    if (!el) return;
 
-    // Trends: requests + tokens + cost (cost on a secondary axis).
-    var a = window.__analytics || { labels: [] };
-    var trendEl = document.getElementById('trendChart');
-    if (trendEl) {
-      charts.push(new Chart(trendEl.getContext('2d'), {
-        type: 'line',
-        data: {
-          labels: a.labels || [],
-          datasets: [
-            { label: 'Requests', data: a.requests || [], borderColor: accent, backgroundColor: rgba(accent, 0.1), borderWidth: 2, tension: 0.35, pointRadius: 0, fill: true, yAxisID: 'y' },
-            { label: 'Tokens', data: (a.input_tokens || []).map(function (v, i) { return v + ((a.output_tokens || [])[i] || 0); }), borderColor: ok, borderWidth: 2, tension: 0.35, pointRadius: 0, yAxisID: 'y' },
-            { label: 'Cost (USD)', data: a.cost_usd || [], borderColor: warn, borderWidth: 2, tension: 0.35, pointRadius: 0, yAxisID: 'y1' }
-          ]
-        },
-        options: {
-          responsive: true, maintainAspectRatio: false,
-          animation: { duration: 700 },
-          interaction: { intersect: false, mode: 'index' },
-          plugins: { legend: { labels: { color: tick, boxWidth: 12, font: { size: 11 } } } },
-          scales: {
-            x: { grid: { display: false }, ticks: { color: tick, font: { size: 11 }, maxTicksLimit: 8 }, border: { display: false } },
-            y: { position: 'left', grid: { color: grid }, ticks: { color: tick, font: { size: 11 }, callback: function (v) { return v >= 1000 ? (v / 1000) + 'k' : v; } }, border: { display: false } },
-            y1: { position: 'right', grid: { display: false }, ticks: { color: tick, font: { size: 11 }, callback: function (v) { return '$' + v.toFixed(2); } }, border: { display: false } }
-          }
-        }
-      }));
-    }
+    var n   = payload.labels.length;
+    var idx = Array.from({ length: n }, function (_, i) { return i; });
 
-    function bar(id, payload) {
-      var el = document.getElementById(id);
-      if (!el || !payload) return;
-      charts.push(new Chart(el.getContext('2d'), {
-        type: 'bar',
-        data: {
-          labels: payload.labels || [],
-          datasets: [{ label: 'Requests', data: payload.requests || [], backgroundColor: rgba(accent, 0.7), borderColor: accent, borderWidth: 1, borderRadius: 4 }]
-        },
-        options: {
-          responsive: true, maintainAspectRatio: false,
-          animation: { duration: 600 },
-          plugins: {
-            legend: { display: false },
-            tooltip: {
-              callbacks: {
-                afterLabel: function (c) {
-                  var cost = (payload.cost_usd || [])[c.dataIndex];
-                  return cost != null ? '$' + cost.toFixed(2) : '';
-                }
-              }
-            }
-          },
-          scales: commonScales(tick, grid)
+    var opts = {
+      width:  el.clientWidth || 600,
+      height: 260,
+      legend: { show: false },
+      scales: { x: { time: false } },
+      axes: [
+        xAxis({
+          values: function (u, vals) { return vals.map(function (v) { return payload.labels[v] != null ? payload.labels[v].slice(0, 16) : ''; }); },
+          gap: 4
+        }),
+        yAxis()
+      ],
+      series: [
+        {},
+        {
+          label:  'Requests',
+          stroke: accent,
+          fill:   rgba(accent, 0.7),
+          paths:  uPlot.paths.bars({ size: [0.6, 100] }),
+          points: { show: false }
         }
-      }));
-    }
-    bar('modelChart', window.__byModel);
-    bar('connChart', window.__byConn);
-    bar('endpointChart', window.__byEndpoint);
+      ]
+    };
+
+    var u = new uPlot(opts, [ idx, payload.requests || [] ], el);
+    charts.push(u);
+
+    var ro = new ResizeObserver(function () {
+      u.setSize({ width: el.clientWidth || 600, height: 260 });
+    });
+    ro.observe(el);
+    observers.push(ro);
   }
 
-  buildAll();
-  window.addEventListener('drgtw-theme-change', function () { destroyAll(); buildAll(); });
+  bar('modelChart',    window.__byModel);
+  bar('connChart',     window.__byConn);
+  bar('endpointChart', window.__byEndpoint);
 })();
 "##;

@@ -102,11 +102,11 @@ async fn ui_dashboard_is_200_when_enabled() {
     assert_eq!(status, StatusCode::OK);
     // Key dashboard elements present.
     assert!(html.contains("Dashboard"), "page title");
-    assert!(html.contains("trafficChart"), "chart canvas mounted");
+    assert!(html.contains("trafficChart"), "chart container mounted");
     assert!(html.contains("Recent requests"), "recent requests table");
     assert!(html.contains("Operational"), "live status pill");
     // Vendored chart + fonts are linked.
-    assert!(html.contains("chart.umd.min.js"), "chart.js vendored script");
+    assert!(html.contains("uPlot.iife.min.js"), "uPlot vendored script");
 }
 
 #[tokio::test]
@@ -231,10 +231,11 @@ async fn ui_absent_when_disabled() {
 
 #[tokio::test]
 async fn ui_assets_served_when_enabled() {
-    // Datastar, Chart.js, and a vendored font all serve.
+    // Datastar, uPlot (js + css), and a vendored font all serve.
     for asset in [
         "/ui/assets/vendor/datastar.js",
-        "/ui/assets/vendor/chart.umd.min.js",
+        "/ui/assets/vendor/uPlot.iife.min.js",
+        "/ui/assets/vendor/uPlot.min.css",
         "/ui/assets/vendor/fonts/Geist-Variable.woff2",
     ] {
         let cfg = load_config("[ui]\nenabled = true\n");

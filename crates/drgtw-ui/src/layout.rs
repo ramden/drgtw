@@ -3,8 +3,7 @@
 //! is built from.
 //!
 //! Design system lives in `styles/theme.css` (compiled into `app.css`). This
-//! module only emits markup + class names. Dark is the default theme; a `.light`
-//! class on `<html>` flips to the bonus light theme.
+//! module only emits markup + class names. Dark-only; no theme toggle.
 
 use maud::{DOCTYPE, Markup, PreEscaped, html};
 
@@ -60,37 +59,38 @@ pub fn shell(
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 title { "drgtw — " (title) }
-                meta name="color-scheme" content="dark light";
-                // Set the chosen theme class BEFORE first paint so neither the
-                // canvas nor the theme flashes on navigation. Render-blocking by
-                // design (tiny). The full toggle helper still loads at body end.
-                script { (PreEscaped(THEME_PREPAINT_JS)) }
-                // Pre-paint background + cross-document view transitions. Inlined
-                // so it applies before app.css loads: the new document paints in
-                // the theme background instead of UA white, and same-origin nav
-                // crossfades instead of hard-cutting.
+                meta name="color-scheme" content="dark";
+                // Pre-paint background: inlined so it applies before app.css
+                // arrives — paints the document background immediately so
+                // navigation never shows a white UA frame.
                 style { (PreEscaped(PREPAINT_CSS)) }
-                link rel="stylesheet" href="/ui/assets/vendor/app.css";
+                // `?v=` cache-bust: the asset filenames are stable, so browsers
+                // pin the old stylesheet across a redesign. Bump on visual change.
+                link rel="stylesheet" href="/ui/assets/vendor/app.css?v=teal2";
                 script src="/ui/assets/vendor/basecoat-all.min.js" defer {}
-                script src="/ui/assets/vendor/chart.umd.min.js" {}
+                link rel="stylesheet" href="/ui/assets/vendor/uPlot.min.css?v=teal2";
+                script src="/ui/assets/vendor/uPlot.iife.min.js?v=teal2" {}
                 script type="module" src="/ui/assets/vendor/datastar.js" {}
             }
             body class="bg-background text-foreground antialiased" {
                 // Sidebar collapse state lives in a single Datastar signal so the
                 // header toggle and the aside width stay in sync.
-                div class="flex min-h-screen" data-signals="{collapsed: false}" {
+                // #app-root is the persistent client-nav swap region: the
+                // pjax router replaces its children on navigation, so the page
+                // never does a full reload (no flash/blink). The collapse signal
+                // lives here and survives swaps.
+                div id="app-root" class="flex min-h-screen" data-signals="{collapsed: false}" {
                     (sidebar(active, history_unlocked, username))
                     div class="flex-1 min-w-0 flex flex-col" {
                         (header_bar(title, breadcrumb))
-                        // `space-y-6` gives every page a consistent vertical
-                        // rhythm between top-level sections/cards, so stacked
-                        // glass cards never sit flush against each other.
-                        main class="flex-1 px-8 py-7 max-w-[1200px] w-full mx-auto" {
-                            div class="space-y-6" { (body) }
+                        // Spacious: wide column, generous padding. `space-y-8`
+                        // gives a calm vertical rhythm between page sections.
+                        main id="app-main" class="flex-1 px-10 py-9 max-w-[1440px] w-full mx-auto" {
+                            div class="space-y-8" { (body) }
                         }
                     }
                 }
-                script { (PreEscaped(THEME_JS)) }
+                script { (PreEscaped(PJAX_JS)) }
             }
         }
     }
@@ -112,7 +112,7 @@ fn sidebar(active: Nav, history_unlocked: bool, username: Option<&str>) -> Marku
             // row from stretching it to full document height — that bound is what
             // lets the inner `nav` (flex-1 overflow-y-auto) scroll on its own and
             // keeps the user footer fixed at the bottom, always visible.
-            class="shrink-0 w-[15.5rem] sticky top-0 h-screen self-start border-r border-border bg-card/40 backdrop-blur-sm flex flex-col transition-all duration-200"
+            class="shrink-0 w-[15.5rem] sticky top-0 h-screen self-start border-r border-border bg-card flex flex-col transition-all duration-200"
             data-style="{width: $collapsed ? '4.25rem' : '15.5rem'}"
         {
             // Brand mark.
@@ -268,10 +268,6 @@ fn user_footer(username: Option<&str>) -> Markup {
                 div data-show="$menu" style="display:none" class="absolute bottom-full mb-2 left-0 w-56 glass rounded-lg p-1 z-20" role="menu" {
                     div class="px-3 py-2 text-xs text-muted-foreground" { (signed_in_label) }
                     div class="h-px bg-border my-1" {}
-                    button type="button" role="menuitem" class="w-full flex items-center justify-between gap-2 rounded-md px-3 py-2 text-sm hover:bg-accent/60 transition-colors" onclick="window.__drgtwToggleTheme()" {
-                        span class="flex items-center gap-2" { span class="size-4 grid place-items-center" { (PreEscaped(ICON_SUN_MOON)) } "Toggle theme" }
-                        span class="kbd" { "⌥T" }
-                    }
                     a href="/ui/settings" role="menuitem" class="w-full flex items-center gap-2 rounded-md px-3 py-2 text-sm hover:bg-accent/60 transition-colors" {
                         span class="size-4 grid place-items-center" { (PreEscaped(ICON_COG)) } "Settings"
                     }
@@ -292,7 +288,7 @@ fn user_footer(username: Option<&str>) -> Markup {
 
 fn header_bar(title: &str, breadcrumb: &str) -> Markup {
     html! {
-        header class="sticky top-0 z-10 h-16 shrink-0 border-b border-border bg-background/70 backdrop-blur-md flex items-center gap-4 px-6" {
+        header class="sticky top-0 z-10 h-16 shrink-0 border-b border-border bg-background flex items-center gap-4 px-6" {
             button type="button"
                 class="shrink-0 size-8 grid place-items-center rounded-md text-muted-foreground hover:text-foreground hover:bg-accent/60 transition-colors"
                 data-on:click="$collapsed = !$collapsed"
@@ -332,9 +328,9 @@ fn header_bar(title: &str, breadcrumb: &str) -> Markup {
 /// In-page header (title + subtitle), used at the top of each page body.
 pub fn page_header(title: &str, subtitle: &str) -> Markup {
     html! {
-        div class="mb-7 rise" style="--i:0" {
-            h2 class="text-2xl font-semibold tracking-tight" { (title) }
-            p class="text-sm text-muted-foreground mt-1" { (subtitle) }
+        div class="mb-8" {
+            h2 class="font-display text-[2rem] leading-tight tracking-tight" { (title) }
+            p class="text-sm text-muted-foreground mt-1.5" { (subtitle) }
         }
     }
 }
@@ -359,7 +355,7 @@ pub fn badge(kind: &str, label: &str) -> Markup {
 /// Centered empty-state card for "coming soon" / "requires Postgres" pages.
 pub fn empty_state(icon: &str, badge_kind: &str, badge_label: &str, title: &str, body: Markup) -> Markup {
     html! {
-        div class="rise grid mx-auto max-w-xl" style="--i:1" {
+        div class="grid mx-auto max-w-xl" {
           div class="glass lift text-center px-8 py-14" {
             div class="icon-orb mx-auto size-16 rounded-2xl grid place-items-center text-primary mb-5" {
                 span class="size-7 grid place-items-center" { (PreEscaped(icon)) }
@@ -374,42 +370,86 @@ pub fn empty_state(icon: &str, badge_kind: &str, badge_label: &str, title: &str,
 
 // --------------------------------------------------------------------- scripts
 
-/// Runs in `<head>`, render-blocking, before first paint: applies the saved
-/// theme class so the pre-paint CSS below picks the right background and the
-/// page never flashes the wrong theme on navigation.
-const THEME_PREPAINT_JS: &str = "\
-(function(){try{\
-  if(localStorage.getItem('drgtw-theme')==='light')\
-    document.documentElement.classList.add('light');\
-}catch(e){}})();";
-
 /// Inlined in `<head>` so it applies before `app.css` arrives: paints the
-/// document background in the theme colour immediately, so a navigation never
-/// shows a white UA frame before the stylesheet loads.
-///
-/// NOTE: cross-document View Transitions (`@view-transition{navigation:auto}`)
-/// were removed. They are Chromium-only, and Chromium crossfades the two
-/// page snapshots with opacity — which re-triggers its backdrop-filter bug on
-/// every `.glass` surface, page-wide, producing a stroboscope flicker on each
-/// navigation. Firefox never animated (no support) and was always clean; this
-/// makes Chromium behave the same — instant, flicker-free swap.
-const PREPAINT_CSS: &str = "\
-html{background:oklch(0.145 0.005 285)}\
-html.light{background:oklch(0.99 0.002 285)}";
+/// document background in the dark theme colour immediately, so a navigation
+/// never shows a white UA frame before the stylesheet loads.
+const PREPAINT_CSS: &str = "html{background:oklch(0.135 0 0)}";
 
-const THEME_JS: &str = "\
-(function(){\
-  var saved = localStorage.getItem('drgtw-theme');\
-  if (saved === 'light') document.documentElement.classList.add('light');\
-  window.__drgtwToggleTheme = function(){\
-    var light = document.documentElement.classList.toggle('light');\
-    localStorage.setItem('drgtw-theme', light ? 'light' : 'dark');\
-    window.dispatchEvent(new Event('drgtw-theme-change'));\
-  };\
-  document.addEventListener('keydown', function(e){\
-    if (e.altKey && (e.key === 't' || e.key === 'T')) { e.preventDefault(); window.__drgtwToggleTheme(); }\
-  });\
-})();";
+/// Client-side navigation ("pjax"): intercept same-origin `/ui/*` link clicks,
+/// fetch the target, and swap only `#app-root`'s children — the document, its
+/// stylesheet, fonts and the chart libs are never reloaded, so navigation has
+/// no full-page teardown and therefore no flash/blink. Uses the View
+/// Transitions API for a crossfade where supported (instant swap otherwise —
+/// still blink-free, since the swap is a single synchronous DOM replacement).
+///
+/// Page-end scripts (chart bootstraps) register teardown fns on
+/// `window.__drgtwCleanup`; the router runs them before each swap so timers /
+/// ResizeObservers don't leak across navigations. Parsed `<script>` nodes are
+/// inert, so the router re-creates them to execute in document order.
+const PJAX_JS: &str = r##"
+(function () {
+  if (window.__drgtwPjax) return;
+  window.__drgtwPjax = true;
+  window.__drgtwCleanup = window.__drgtwCleanup || [];
+
+  function cleanup() {
+    var fns = window.__drgtwCleanup || [];
+    for (var i = 0; i < fns.length; i++) { try { fns[i](); } catch (e) {} }
+    window.__drgtwCleanup = [];
+  }
+  function runScripts(scope) {
+    scope.querySelectorAll('script').forEach(function (old) {
+      var s = document.createElement('script');
+      for (var i = 0; i < old.attributes.length; i++) {
+        s.setAttribute(old.attributes[i].name, old.attributes[i].value);
+      }
+      s.textContent = old.textContent;
+      old.parentNode.replaceChild(s, old);
+    });
+  }
+  function apply(doc) {
+    var next = doc.getElementById('app-root');
+    var cur = document.getElementById('app-root');
+    if (!next || !cur) return false;
+    cleanup();
+    cur.replaceChildren.apply(cur, Array.prototype.slice.call(next.childNodes));
+    if (doc.title) document.title = doc.title;
+    var main = document.getElementById('app-main') || cur;
+    runScripts(main);
+    window.scrollTo(0, 0);
+    return true;
+  }
+  function navigate(url, push) {
+    fetch(url, { headers: { 'X-Requested-With': 'pjax' }, credentials: 'same-origin' })
+      .then(function (r) {
+        var ct = r.headers.get('content-type') || '';
+        if (!r.ok || ct.indexOf('text/html') === -1) throw 0;
+        return r.text();
+      })
+      .then(function (html) {
+        var doc = new DOMParser().parseFromString(html, 'text/html');
+        var run = function () { if (!apply(doc)) { location.href = url; } };
+        if (push) history.pushState({ pjax: 1 }, '', url);
+        if (document.startViewTransition) document.startViewTransition(run); else run();
+      })
+      .catch(function () { location.href = url; });
+  }
+
+  document.addEventListener('click', function (e) {
+    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    var a = e.target.closest ? e.target.closest('a') : null;
+    if (!a) return;
+    if (a.target || a.hasAttribute('download') || a.getAttribute('rel') === 'external') return;
+    if (a.origin !== location.origin) return;
+    if (a.pathname.indexOf('/ui') !== 0) return;        // only in-app routes
+    if (a.pathname === location.pathname && !a.hash) { e.preventDefault(); return; }
+    if (a.hash && a.pathname === location.pathname) return; // let in-page anchors work
+    e.preventDefault();
+    navigate(a.href, true);
+  });
+  window.addEventListener('popstate', function () { navigate(location.href, false); });
+})();
+"##;
 
 // ----------------------------------------------------------------------- icons
 // Inline lucide SVGs (https://lucide.dev), MIT. Stroke = currentColor so they
@@ -435,5 +475,3 @@ pub const ICON_CHEVRON_UPDOWN: &str = r#"<svg xmlns="http://www.w3.org/2000/svg"
 pub const ICON_SUN_MOON: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8a2.83 2.83 0 0 0 4 4 4 4 0 1 1-4-4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.9 4.9 1.4 1.4"/><path d="m17.7 17.7 1.4 1.4"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.3 17.7-1.4 1.4"/><path d="m19.1 4.9-1.4 1.4"/></svg>"#;
 pub const ICON_LOGOUT: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg>"#;
 pub const ICON_DATABASE: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 3 0 0 0 21 12"/></svg>"#;
-pub const ICON_BOLT: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9z"/></svg>"#;
-pub const ICON_TOKENS: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 12h8"/><path d="M12 8v8"/></svg>"#;

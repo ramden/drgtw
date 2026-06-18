@@ -40,16 +40,11 @@ pub use traces::traces;
 use drgtw_history::{Bucket, UsageBucket};
 use maud::{Markup, PreEscaped, html};
 
-/// A reusable glass card with optional fade-rise stagger index.
-pub(crate) fn glass_card(stagger: usize, inner: Markup) -> Markup {
+/// A reusable glass card. The `stagger` param is accepted but ignored — the
+/// redesign removes entrance animations; callers need not be updated.
+pub(crate) fn glass_card(_stagger: usize, inner: Markup) -> Markup {
     html! {
-        // `.rise` (transform) on the wrapper, never on the filtered `.glass`
-        // element — moving a backdrop-filtered box re-samples its backdrop each
-        // frame and shimmers. `grid` makes the single child stretch to fill the
-        // wrapper in any layout (block / grid cell / flex item).
-        div class="rise grid" style=(format!("--i:{stagger}")) {
-            div class="glass lift p-5" { (inner) }
-        }
+        div class="glass lift p-5" { (inner) }
     }
 }
 
@@ -148,12 +143,15 @@ pub(crate) fn status_kind(status: u16) -> &'static str {
     }
 }
 
-/// Serialise usage buckets into the parallel-array JSON the Chart.js client
+/// Serialise usage buckets into the parallel-array JSON the uPlot client
 /// consumes (`window.__traffic` + the `/ui/api/timeseries` endpoint share this
-/// shape). `labels` are short, bucket-appropriate time strings.
+/// shape). `labels` are short, bucket-appropriate time strings. `x` is an
+/// array of epoch **seconds** (i64) — the native time format expected by uPlot
+/// `scales: { x: { time: true } }`.
 pub(crate) fn timeseries_json(buckets: &[UsageBucket], bucket: Bucket) -> serde_json::Value {
     let labels: Vec<String> = buckets.iter().map(|b| fmt_bucket_label(b.ts_ms, bucket)).collect();
     serde_json::json!({
+        "x": buckets.iter().map(|b| b.ts_ms / 1000).collect::<Vec<_>>(),
         "labels": labels,
         "requests": buckets.iter().map(|b| b.requests).collect::<Vec<_>>(),
         "input_tokens": buckets.iter().map(|b| b.input_tokens).collect::<Vec<_>>(),
@@ -161,6 +159,45 @@ pub(crate) fn timeseries_json(buckets: &[UsageBucket], bucket: Bucket) -> serde_
         "cost_usd": buckets.iter().map(|b| b.cost_usd).collect::<Vec<_>>(),
         "avg_latency_ms": buckets.iter().map(|b| b.avg_latency_ms).collect::<Vec<_>>(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use drgtw_history::{Bucket, UsageBucket};
+
+    fn make_bucket(ts_ms: i64, requests: i64) -> UsageBucket {
+        UsageBucket { ts_ms, requests, input_tokens: 0, output_tokens: 0, cost_usd: 0.0, avg_latency_ms: 0.0 }
+    }
+
+    #[test]
+    fn timeseries_json_x_is_epoch_seconds() {
+        let buckets = vec![
+            make_bucket(1_700_000_000_000, 5),
+            make_bucket(1_700_003_600_000, 12),
+            make_bucket(1_700_007_200_000, 3),
+        ];
+        let json = timeseries_json(&buckets, Bucket::Hour);
+
+        let x = json["x"].as_array().expect("x must be an array");
+        assert_eq!(x.len(), 3, "x length must match bucket count");
+        assert_eq!(x[0].as_i64().unwrap(), 1_700_000_000);
+        assert_eq!(x[1].as_i64().unwrap(), 1_700_003_600);
+        assert_eq!(x[2].as_i64().unwrap(), 1_700_007_200);
+
+        let reqs = json["requests"].as_array().expect("requests must be an array");
+        assert_eq!(reqs.len(), x.len(), "requests and x must have equal length");
+        assert_eq!(reqs[0].as_i64().unwrap(), 5);
+        assert_eq!(reqs[1].as_i64().unwrap(), 12);
+        assert_eq!(reqs[2].as_i64().unwrap(), 3);
+    }
+
+    #[test]
+    fn timeseries_json_empty_buckets() {
+        let json = timeseries_json(&[], Bucket::Day);
+        assert_eq!(json["x"].as_array().unwrap().len(), 0);
+        assert_eq!(json["requests"].as_array().unwrap().len(), 0);
+    }
 }
 
 /// Axis label for one bucket: `HH:00` for hourly, `MM-DD` for daily.

@@ -1,9 +1,11 @@
-/* drgtw admin console — custom theme layer.
+/* drgtw admin console — "Instrument" design system.
  *
- * Dark-first design system: near-black canvas, hairline-bordered glass
- * surfaces, a single indigo→violet accent, Geist Sans/Mono (vendored woff2,
- * offline-safe, NO Google Fonts), and restrained CSS motion.
+ * A refined privacy-infrastructure console. Dark-only, warm graphite canvas
+ * (NOT blue-black), a single honey-amber signal accent used sparingly, and an
+ * editorial display serif (Instrument Serif) paired with Geist Sans/Mono.
+ * Spacious, premium, flat surfaces with hairline borders and faint atmosphere.
  *
+ * All fonts vendored woff2 (offline-safe, NO Google Fonts).
  * Imported by input.css so the Tailwind v4 CLI emits it into app.css.
  */
 
@@ -22,73 +24,79 @@
   font-style: normal;
   font-display: swap;
 }
+/* Editorial display serif — used for the hero metric, page titles, wordmark. */
+@font-face {
+  font-family: "Instrument Serif";
+  src: url("/ui/assets/vendor/fonts/InstrumentSerif-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Instrument Serif";
+  src: url("/ui/assets/vendor/fonts/InstrumentSerif-Italic.woff2") format("woff2");
+  font-weight: 400;
+  font-style: italic;
+  font-display: swap;
+}
 
 /* ------------------------------------------------------------ theme vars --- */
-/* Dark is the default (root). Light is the opt-in `.light` override below.
- * Basecoat/shadcn token names are reused so component classes keep working. */
+/* Dark-only. Warm graphite + honey amber. */
 :root {
   --font-sans: "Geist", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "Geist Mono", ui-monospace, "SF Mono", monospace;
+  --font-display: "Instrument Serif", ui-serif, Georgia, "Times New Roman", serif;
 
-  --background: oklch(0.145 0.005 285);
-  --foreground: oklch(0.96 0.003 285);
+  /* ========================================================================
+   * PALETTE — tweak these. Everything else derives from them, so changing
+   * --primary reflows buttons, active-nav, links, the chart line, sparklines,
+   * hover rings and the brand mark in one go. Set --primary-foreground to a
+   * colour legible ON the accent (dark text for light/bright accents, white
+   * for dark ones). Accent tints (fills/borders) auto-follow via color-mix.
+   * ====================================================================== */
+  --primary: oklch(0.72 0.12 195);          /* teal */
+  --primary-foreground: oklch(0.16 0 0);    /* text on primary */
 
-  --card: oklch(0.18 0.006 285);
-  --card-foreground: oklch(0.96 0.003 285);
-  --popover: oklch(0.17 0.006 285);
-  --popover-foreground: oklch(0.96 0.003 285);
+  --success: oklch(0.82 0.11 192);          /* lighter teal (kin to --primary) */
+  --warning: oklch(0.82 0.15 90);           /* amber */
+  --error:   oklch(0.64 0.2 25);            /* red */
 
-  --primary: oklch(0.62 0.21 280);
-  --primary-foreground: oklch(0.99 0 0);
+  /* Neutral canvas + surfaces (zero hue). Usually leave these alone. */
+  --background: oklch(0.135 0 0);
+  --foreground: oklch(0.96 0 0);
+  --card: oklch(0.165 0 0);
+  --muted-foreground: oklch(0.64 0 0);
+  --border: oklch(1 0 0 / 9%);
+  --radius: 0.7rem;
+  /* ====================================================================== */
 
-  --secondary: oklch(0.24 0.008 285);
-  --secondary-foreground: oklch(0.96 0.003 285);
-
-  --muted: oklch(0.22 0.006 285);
-  --muted-foreground: oklch(0.66 0.012 286);
-
-  --accent: oklch(0.26 0.02 285);
-  --accent-foreground: oklch(0.98 0.003 285);
-
-  --destructive: oklch(0.62 0.21 25);
+  /* --- derived (leave) --------------------------------------------------- */
+  --card-foreground: var(--foreground);
+  --popover: var(--card);
+  --popover-foreground: var(--foreground);
+  --secondary: oklch(0.22 0 0);
+  --secondary-foreground: var(--foreground);
+  --muted: oklch(0.2 0 0);
+  --accent: oklch(0.22 0 0);
+  --accent-foreground: var(--foreground);
+  --input: oklch(1 0 0 / 14%);
+  --ring: var(--primary);
+  --destructive: var(--error);
   --destructive-foreground: oklch(0.99 0 0);
 
-  --border: oklch(1 0 0 / 8%);
-  --input: oklch(1 0 0 / 12%);
-  --ring: oklch(0.62 0.21 280);
+  /* status aliases consumed by components/badges */
+  --ok: var(--success);
+  --warn: var(--warning);
+  --down: var(--error);
 
-  --radius: 0.7rem;
+  /* accent tints — auto-follow --primary (used for fills/borders/orbs) */
+  --primary-tint:   color-mix(in oklch, var(--primary) 12%, transparent);
+  --primary-tint-2: color-mix(in oklch, var(--primary) 24%, transparent);
 
-  /* console-specific accents */
-  --brand-from: oklch(0.65 0.22 280);
-  --brand-to: oklch(0.7 0.19 320);
-  --ok: oklch(0.7 0.17 160);
-  --warn: oklch(0.8 0.16 85);
-  --down: oklch(0.62 0.21 25);
+  --brand-from: var(--primary);
+  --brand-to: var(--primary);
 
   color-scheme: dark;
-}
-
-/* Light theme — bonus toggle. Activated by `.light` on <html>. */
-.light {
-  --background: oklch(0.99 0.002 285);
-  --foreground: oklch(0.2 0.01 285);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.2 0.01 285);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.2 0.01 285);
-  --primary: oklch(0.55 0.22 280);
-  --primary-foreground: oklch(0.99 0 0);
-  --secondary: oklch(0.96 0.004 285);
-  --secondary-foreground: oklch(0.25 0.01 285);
-  --muted: oklch(0.96 0.004 285);
-  --muted-foreground: oklch(0.5 0.012 286);
-  --accent: oklch(0.95 0.01 285);
-  --accent-foreground: oklch(0.25 0.01 285);
-  --border: oklch(0.2 0.02 285 / 10%);
-  --input: oklch(0.2 0.02 285 / 14%);
-  --ring: oklch(0.55 0.22 280);
-  color-scheme: light;
 }
 
 /* Map tokens into Tailwind v4's theme so `bg-card`, `text-muted-foreground`,
@@ -117,6 +125,7 @@
   --color-down: var(--down);
   --font-sans: var(--font-sans);
   --font-mono: var(--font-mono);
+  --font-display: var(--font-display);
   --radius: var(--radius);
 }
 
@@ -132,75 +141,62 @@ html {
 body {
   background: var(--background);
   color: var(--foreground);
-  /* faint top-of-page brand aura */
-  background-image:
-    radial-gradient(60rem 36rem at 82% -12%, oklch(0.62 0.21 280 / 13%), transparent 60%),
-    radial-gradient(50rem 30rem at 0% -6%, oklch(0.7 0.19 320 / 9%), transparent 55%);
-  background-attachment: fixed;
 }
+
 code, pre, .mono { font-family: var(--font-mono); }
 
-/* --------------------------------------------------------------- effects --- */
-/* Brand gradient mark / text. */
-.brand-gradient {
-  background: linear-gradient(135deg, var(--brand-from), var(--brand-to));
+/* ----------------------------------------------------------- typography --- */
+/* Display headings — clean sans (Geist), tight + confident. */
+.font-display {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  letter-spacing: -0.02em;
 }
-.brand-text {
-  background: linear-gradient(135deg, var(--brand-from), var(--brand-to));
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-}
-/* Big stat numbers: subtle gradient fill + tabular figures. */
-.stat-gradient {
+/* Hero metric — oversized sans numerals, tight leading. */
+.stat-hero {
+  font-family: var(--font-sans);
+  font-weight: 600;
   font-variant-numeric: tabular-nums;
-  background: linear-gradient(135deg, var(--foreground), oklch(0.72 0.13 285));
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
+  line-height: 0.92;
+  letter-spacing: -0.03em;
 }
+/* KPI / table numbers — clean tabular sans for precision. */
+.stat-gradient { font-variant-numeric: tabular-nums; color: var(--foreground); }
 .tnum { font-variant-numeric: tabular-nums; }
 
-/* Glass surface: translucent fill, blur, hairline border, inner top highlight,
- * soft shadow. The ::before paints the 1px top inner highlight. */
-.glass {
-  position: relative;
-  background: color-mix(in oklch, var(--card) 72%, transparent);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: 0 1px 2px oklch(0 0 0 / 30%), 0 8px 30px oklch(0 0 0 / 22%);
-}
-.glass::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  padding-top: 1px;
-  background: linear-gradient(to bottom, oklch(1 0 0 / 8%), transparent 40%);
-  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
-  pointer-events: none;
-}
-/* Metric (hero) cards add a barely-there violet sheen. */
-.glass-metric {
-  background:
-    radial-gradient(120% 100% at 0% 0%, oklch(0.62 0.21 280 / 8%), transparent 55%),
-    color-mix(in oklch, var(--card) 72%, transparent);
+/* --------------------------------------------------------------- surfaces --- */
+/* Brand mark — solid amber chip. */
+.brand-gradient { background: var(--primary); }
+/* Wordmark — Geist, warm foreground. */
+.brand-text {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  color: var(--foreground);
+  letter-spacing: -0.01em;
 }
 
-/* Cards: no movement on hover (they aren't clickable) — just a faint border
-   so the surface feels alive without the jump-and-shadow effect. */
-.lift { transition: border-color .18s ease; }
-.lift:hover {
-  border-color: oklch(1 0 0 / 12%);
+/* Flat solid card — no blur, no translucency. */
+.glass {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 1px 2px oklch(0 0 0 / 22%);
 }
+/* Metric cards: flat alias with the card surface (no tint). */
+.glass-metric {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 1px 2px oklch(0 0 0 / 22%);
+}
+
+/* Cards: faint accent border brightening on hover, no movement. */
+.lift { transition: border-color .18s ease; }
+.lift:hover { border-color: var(--primary-tint-2); }
 .row-lift { transition: background-color .15s ease; }
 .row-lift:hover { background: oklch(1 0 0 / 4%); }
 
-/* Pulsing live dot (emerald). */
+/* Pulsing live dot (emerald) — small, justified for live status. */
 .live-dot {
   position: relative;
   display: inline-block;
@@ -212,66 +208,55 @@ code, pre, .mono { font-family: var(--font-mono); }
 }
 @keyframes pulse-dot {
   0%   { box-shadow: 0 0 0 0 color-mix(in oklch, var(--ok) 60%, transparent); }
-  70%  { box-shadow: 0 0 0 .5rem oklch(0.7 0.17 160 / 0%); }
-  100% { box-shadow: 0 0 0 0 oklch(0.7 0.17 160 / 0%); }
+  70%  { box-shadow: 0 0 0 .5rem transparent; }
+  100% { box-shadow: 0 0 0 0 transparent; }
 }
 
-/* Brand-mark gradient shimmer (animated background position). */
-.shimmer {
-  background-size: 200% 200%;
-  animation: shimmer 6s ease infinite;
-}
-@keyframes shimmer {
-  0%   { background-position: 0% 50%; }
-  50%  { background-position: 100% 50%; }
-  100% { background-position: 0% 50%; }
-}
+.shimmer { background-size: 200% 200%; }
 
-/* Card fade+rise on page load, with stagger via inline --i custom property. */
-.rise {
-  opacity: 0;
-  animation: rise .5s cubic-bezier(.2,.7,.2,1) forwards;
-  animation-delay: calc(var(--i, 0) * 60ms);
-}
-@keyframes rise {
-  from { opacity: 0; transform: translateY(10px); }
-  to   { opacity: 1; transform: translateY(0); }
-}
+/* ------------------------------------------------------------- page swap --- */
+/* Client-side nav swaps #app-root's children in a single synchronous DOM
+ * replacement — no full-page reload, no empty frame, no blink. Motion is
+ * handled by the View Transitions crossfade where supported (instant swap
+ * otherwise). No entrance keyframe: a fade-from-empty would itself flash. */
+.rise { opacity: 1; }
+::view-transition-old(root), ::view-transition-new(root) { animation-duration: 150ms; }
 
-/* Active nav indicator: gradient pill. */
+/* Active nav indicator: quiet accent-tinted fill + accent edge bar. */
 .nav-active {
-  background: linear-gradient(135deg, oklch(0.62 0.21 280 / 22%), oklch(0.7 0.19 320 / 16%));
-  border: 1px solid oklch(0.65 0.22 280 / 35%);
-  box-shadow: inset 0 1px 0 oklch(1 0 0 / 8%);
+  background: var(--primary-tint);
+  border: 1px solid var(--primary-tint-2);
 }
 .nav-active .nav-bar {
   position: absolute; left: 0; top: 18%; bottom: 18%;
   width: 3px; border-radius: 0 3px 3px 0;
-  background: linear-gradient(180deg, var(--brand-from), var(--brand-to));
+  background: var(--primary);
 }
 
-/* Soft gradient icon circle for empty states. */
+/* Flat accent icon circle for empty states. */
 .icon-orb {
-  background: radial-gradient(120% 120% at 30% 20%, oklch(0.62 0.21 280 / 35%), oklch(0.7 0.19 320 / 12%));
-  border: 1px solid oklch(0.65 0.22 280 / 30%);
+  background: var(--primary-tint);
+  border: 1px solid var(--primary-tint-2);
+  color: var(--primary);
 }
 
-/* Primary button gradient. */
+/* Primary button — solid amber, dark text. */
 .btn-brand {
-  background: linear-gradient(135deg, var(--brand-from), var(--brand-to));
-  color: oklch(0.99 0 0);
+  background: var(--primary);
+  color: var(--primary-foreground);
   border: none;
-  box-shadow: 0 1px 2px oklch(0 0 0 / 30%), inset 0 1px 0 oklch(1 0 0 / 18%);
-  transition: filter .15s ease, transform .15s ease;
+  box-shadow: 0 1px 2px oklch(0 0 0 / 30%);
+  transition: filter .15s ease;
 }
-.btn-brand:hover { filter: brightness(1.08); transform: translateY(-1px); }
+.btn-brand:hover { filter: brightness(1.06); }
 
-/* Status badge tints. */
-.badge-ok    { background: oklch(0.7 0.17 160 / 14%); color: var(--ok);   border: 1px solid oklch(0.7 0.17 160 / 30%); }
-.badge-warn  { background: oklch(0.8 0.16 85 / 14%);  color: var(--warn); border: 1px solid oklch(0.8 0.16 85 / 30%); }
-.badge-down  { background: oklch(0.62 0.21 25 / 14%); color: var(--down); border: 1px solid oklch(0.62 0.21 25 / 30%); }
+/* Status badge tints — derived from the status knobs (color-mix), so changing
+ * --success/--warning/--error reflows them. */
+.badge-ok    { background: color-mix(in oklch, var(--ok) 15%, transparent);   color: var(--ok);   border: 1px solid color-mix(in oklch, var(--ok) 32%, transparent); }
+.badge-warn  { background: color-mix(in oklch, var(--warn) 15%, transparent); color: var(--warn); border: 1px solid color-mix(in oklch, var(--warn) 32%, transparent); }
+.badge-down  { background: color-mix(in oklch, var(--down) 15%, transparent); color: var(--down); border: 1px solid color-mix(in oklch, var(--down) 32%, transparent); }
 .badge-muted { background: oklch(1 0 0 / 6%); color: var(--muted-foreground); border: 1px solid var(--border); }
-.badge-brand { background: oklch(0.62 0.21 280 / 16%); color: oklch(0.78 0.15 285); border: 1px solid oklch(0.65 0.22 280 / 30%); }
+.badge-brand { background: var(--primary-tint); color: var(--primary); border: 1px solid var(--primary-tint-2); }
 
 /* Command-palette search pill. */
 .search-pill {
@@ -279,7 +264,7 @@ code, pre, .mono { font-family: var(--font-mono); }
   border: 1px solid var(--border);
   transition: border-color .15s ease, background-color .15s ease;
 }
-.search-pill:hover { border-color: oklch(1 0 0 / 16%); background: oklch(1 0 0 / 6%); }
+.search-pill:hover { border-color: var(--primary-tint-2); background: oklch(1 0 0 / 6%); }
 
 /* kbd chip. */
 .kbd {
@@ -294,10 +279,12 @@ code, pre, .mono { font-family: var(--font-mono); }
 
 /* Respect reduced-motion. */
 @media (prefers-reduced-motion: reduce) {
-  .rise, .shimmer, .live-dot, .lift, .btn-brand { animation: none !important; transition: none !important; opacity: 1 !important; }
+  .shimmer, .live-dot, .lift, .btn-brand { animation: none !important; transition: none !important; opacity: 1 !important; }
+  #app-main { animation: none !important; }
+  ::view-transition-old(root), ::view-transition-new(root) { animation: none !important; }
 }
 
-/* Thin scrollbar in dark surfaces. */
+/* Thin neutral scrollbar. */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: oklch(1 0 0 / 10%); border-radius: 9999px; border: 2px solid transparent; background-clip: content-box; }
 ::-webkit-scrollbar-thumb:hover { background: oklch(1 0 0 / 18%); background-clip: content-box; }

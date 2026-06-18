@@ -8,10 +8,16 @@ basecoat.cdn.min.css     basecoat-css 0.3.11
 basecoat-all.min.js      basecoat-css 0.3.11
   https://cdn.jsdelivr.net/npm/basecoat-css@0.3.11/dist/js/all.min.js
 
-chart.umd.min.js         chart.js 4.5.1 (208522 bytes)
-  https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.min.js
+uPlot.iife.min.js        uPlot 1.6.32 (51081 bytes) — fast, tiny time-series charts
+  https://cdn.jsdelivr.net/npm/uplot@1.6.32/dist/uPlot.iife.min.js
+uPlot.min.css            uPlot 1.6.32 (1857 bytes)
+  https://cdn.jsdelivr.net/npm/uplot@1.6.32/dist/uPlot.min.css
 
 fonts/Geist-Variable.woff2      geist 1.7.2 (69652 bytes) — Geist Sans variable
   https://cdn.jsdelivr.net/npm/geist@1.7.2/dist/fonts/geist-sans/Geist-Variable.woff2
 fonts/GeistMono-Variable.woff2  geist 1.7.2 (71368 bytes) — Geist Mono variable
   https://cdn.jsdelivr.net/npm/geist@1.7.2/dist/fonts/geist-mono/GeistMono-Variable.woff2
+fonts/InstrumentSerif-Regular.woff2  Instrument Serif (21032 bytes) — editorial display serif
+  https://cdn.jsdelivr.net/fontsource/fonts/instrument-serif@latest/latin-400-normal.woff2
+fonts/InstrumentSerif-Italic.woff2   Instrument Serif italic (22128 bytes)
+  https://cdn.jsdelivr.net/fontsource/fonts/instrument-serif@latest/latin-400-italic.woff2
