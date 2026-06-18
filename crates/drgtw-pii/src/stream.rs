@@ -75,6 +75,7 @@ impl MapView for RealMapView {
 // Pre-computed per-placeholder data
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
 struct PlaceholderEntry {
     placeholder: String,
     /// JSON-string-escaped original, cached once at construction time.
@@ -122,6 +123,22 @@ impl StreamRestorer {
     #[doc(hidden)]
     pub fn holdback_len(&self) -> usize {
         self.buf.len()
+    }
+
+    /// Create a sibling restorer that shares this restorer's placeholder table
+    /// but starts with an **empty holdback buffer**.
+    ///
+    /// Used to restore independent text streams concurrently — e.g. each tool
+    /// call's `arguments` is its own logical stream and must not share holdback
+    /// with the assistant `content` stream or with other tool calls (otherwise
+    /// the tail of one stream would leak into the head of the next).
+    pub fn fork(&self) -> Self {
+        Self {
+            _map: Arc::clone(&self._map),
+            entries: self.entries.clone(),
+            max_ph_len: self.max_ph_len,
+            buf: String::new(),
+        }
     }
 
     /// Internal constructor shared with tests — accepts any `MapView`.

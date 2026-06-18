@@ -42,6 +42,12 @@ use drgtw_pii::{body::BodyFormat, StreamRestorer};
 /// boundaries.
 pub struct SseRestorer {
     restorer: StreamRestorer,
+    /// One restorer per tool-call stream (keyed by the chunk's tool-call /
+    /// content-block `index`). Tool-call `arguments` (OpenAI) and tool input
+    /// JSON (Anthropic `input_json_delta`) stream as their own text and must
+    /// not share holdback with `content` or with each other. Created lazily
+    /// by forking [`Self::restorer`]. `BTreeMap` keeps flush order deterministic.
+    arg_restorers: std::collections::BTreeMap<u64, StreamRestorer>,
     format: BodyFormat,
     /// Incoming bytes not yet split into a complete event.
     buf: Vec<u8>,
@@ -61,6 +67,7 @@ impl SseRestorer {
     pub fn new(restorer: StreamRestorer, format: BodyFormat) -> Self {
         Self {
             restorer,
+            arg_restorers: std::collections::BTreeMap::new(),
             format,
             buf: Vec::new(),
             flushed: false,
@@ -105,12 +112,9 @@ impl SseRestorer {
             self.process_event(&leftover, &mut out);
         }
         if !self.flushed {
-            // No explicit terminator seen: flush holdback as a final synthetic
-            // text event appended after everything else.
-            let rest = self.restorer.finish();
-            if !rest.is_empty() {
-                out.extend_from_slice(self.synthetic_event(&rest).as_bytes());
-            }
+            // No explicit terminator seen: flush holdback as final synthetic
+            // events appended after everything else.
+            self.flush_holdbacks(&mut out);
             self.flushed = true;
         }
         out
@@ -156,14 +160,32 @@ impl SseRestorer {
         out.extend_from_slice(rebuilt.as_bytes());
     }
 
-    /// Emit the holdback flush (synthetic event) then the terminator verbatim.
+    /// Emit the holdback flush (synthetic events) then the terminator verbatim.
     fn emit_flush_then(&mut self, terminator: &str, out: &mut Vec<u8>) {
+        self.flush_holdbacks(out);
+        out.extend_from_slice(terminator.as_bytes());
+        self.flushed = true;
+    }
+
+    /// Flush every restorer's residual holdback as synthetic `data:` events:
+    /// the `content` stream first, then each tool-call/argument stream in
+    /// ascending index order. Empty holdbacks emit nothing.
+    fn flush_holdbacks(&mut self, out: &mut Vec<u8>) {
         let rest = self.restorer.finish();
         if !rest.is_empty() {
             out.extend_from_slice(self.synthetic_event(&rest).as_bytes());
         }
-        out.extend_from_slice(terminator.as_bytes());
-        self.flushed = true;
+        let indices: Vec<u64> = self.arg_restorers.keys().copied().collect();
+        for index in indices {
+            let rest = self
+                .arg_restorers
+                .get_mut(&index)
+                .expect("index came from keys()")
+                .finish();
+            if !rest.is_empty() {
+                out.extend_from_slice(self.synthetic_tool_args_event(index, &rest).as_bytes());
+            }
+        }
     }
 
     /// Transform a single JSON `data:` payload, returning the re-serialised
@@ -183,7 +205,10 @@ impl SseRestorer {
         serde_json::to_string(&value).unwrap_or_else(|_| payload.to_owned())
     }
 
-    /// OpenAI chat chunk: text lives at `choices[0].delta.content`.
+    /// OpenAI chat chunk: assistant text streams at `choices[0].delta.content`;
+    /// tool-call arguments stream at
+    /// `choices[0].delta.tool_calls[].function.arguments` (one fragment per
+    /// chunk, keyed by `tool_calls[].index`).
     fn transform_openai(&mut self, value: &mut serde_json::Value) {
         // Remember id/model for a possible synthetic flush event.
         if let Some(id) = value.get("id").and_then(|v| v.as_str()) {
@@ -193,42 +218,87 @@ impl SseRestorer {
             self.last_model = Some(model.to_owned());
         }
 
-        // Only touch the content field when it is a present string.
-        let Some(content) = value
+        let Some(delta) = value
             .get_mut("choices")
             .and_then(|c| c.get_mut(0))
             .and_then(|c| c.get_mut("delta"))
-            .and_then(|d| d.get_mut("content"))
         else {
-            return; // role-only / finish_reason / usage chunk: untouched.
+            return; // empty choices (e.g. usage chunk): untouched.
         };
-        if let Some(text) = content.as_str() {
+
+        // Assistant content (string) — shared `content` holdback stream.
+        if let Some(content) = delta.get_mut("content")
+            && let Some(text) = content.as_str()
+        {
             let released = self.restorer.feed(text);
             *content = serde_json::Value::String(released);
         }
+
+        // Tool-call argument fragments — one holdback stream per call index.
+        if let Some(tool_calls) = delta.get_mut("tool_calls").and_then(|t| t.as_array_mut()) {
+            for call in tool_calls {
+                let index = call.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
+                let Some(args) = call.get_mut("function").and_then(|f| f.get_mut("arguments"))
+                else {
+                    continue;
+                };
+                if let Some(frag) = args.as_str() {
+                    let released = self.feed_arg_stream(index, frag);
+                    *args = serde_json::Value::String(released);
+                }
+            }
+        }
     }
 
-    /// Anthropic event: text lives in `content_block_delta` with
-    /// `delta.type == "text_delta"` at `delta.text`.
+    /// Feed a fragment through the per-index argument restorer, forking a fresh
+    /// restorer (sharing the placeholder table, empty holdback) on first use.
+    fn feed_arg_stream(&mut self, index: u64, fragment: &str) -> String {
+        let restorer = self
+            .arg_restorers
+            .entry(index)
+            .or_insert_with(|| self.restorer.fork());
+        restorer.feed(fragment)
+    }
+
+    /// Anthropic event: assistant text streams in `content_block_delta` with
+    /// `delta.type == "text_delta"` at `delta.text`; tool input streams in the
+    /// same event type with `delta.type == "input_json_delta"` at
+    /// `delta.partial_json` (keyed by the block `index`).
     fn transform_anthropic(&mut self, value: &mut serde_json::Value) {
-        let is_text_delta = value.get("type").and_then(|v| v.as_str())
-            == Some("content_block_delta")
-            && value
-                .get("delta")
-                .and_then(|d| d.get("type"))
-                .and_then(|t| t.as_str())
-                == Some("text_delta");
-        if !is_text_delta {
+        if value.get("type").and_then(|v| v.as_str()) != Some("content_block_delta") {
             return; // everything else untouched.
         }
-        if let Some(index) = value.get("index").and_then(|v| v.as_u64()) {
+        let delta_type = value
+            .get("delta")
+            .and_then(|d| d.get("type"))
+            .and_then(|t| t.as_str())
+            .map(str::to_owned);
+        let index = value.get("index").and_then(|v| v.as_u64());
+        if let Some(index) = index {
             self.last_index = index;
         }
-        if let Some(text_field) = value.get_mut("delta").and_then(|d| d.get_mut("text"))
-            && let Some(text) = text_field.as_str()
-        {
-            let released = self.restorer.feed(text);
-            *text_field = serde_json::Value::String(released);
+        match delta_type.as_deref() {
+            Some("text_delta") => {
+                if let Some(text_field) = value.get_mut("delta").and_then(|d| d.get_mut("text"))
+                    && let Some(text) = text_field.as_str()
+                {
+                    let released = self.restorer.feed(text);
+                    *text_field = serde_json::Value::String(released);
+                }
+            }
+            Some("input_json_delta") => {
+                // Per-block holdback stream; default index 0 when absent.
+                let index = index.unwrap_or(0);
+                if let Some(field) = value
+                    .get_mut("delta")
+                    .and_then(|d| d.get_mut("partial_json"))
+                    && let Some(frag) = field.as_str()
+                {
+                    let released = self.feed_arg_stream(index, frag);
+                    *field = serde_json::Value::String(released);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -259,6 +329,47 @@ impl SseRestorer {
                     "type": "content_block_delta",
                     "index": self.last_index,
                     "delta": {"type": "text_delta", "text": rest},
+                });
+                format!(
+                    "event: content_block_delta\ndata: {}\n\n",
+                    serde_json::to_string(&obj).unwrap()
+                )
+            }
+        }
+    }
+
+    /// Build a synthetic `data:` event carrying restored tool-call argument
+    /// holdback for stream `index`, shaped for the active body format. The
+    /// downstream consumer reassembles arguments by concatenating fragments per
+    /// index, so this tail simply continues that index's stream.
+    fn synthetic_tool_args_event(&self, index: u64, rest: &str) -> String {
+        match self.format {
+            BodyFormat::OpenAiChat => {
+                let id = self.last_id.as_deref().unwrap_or("drgtw");
+                let mut obj = serde_json::json!({
+                    "id": id,
+                    "object": "chat.completion.chunk",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"tool_calls": [{
+                            "index": index,
+                            "function": {"arguments": rest},
+                        }]},
+                        "finish_reason": serde_json::Value::Null,
+                    }],
+                });
+                if let Some(model) = &self.last_model {
+                    obj.as_object_mut()
+                        .unwrap()
+                        .insert("model".to_owned(), serde_json::Value::String(model.clone()));
+                }
+                format!("data: {}\n\n", serde_json::to_string(&obj).unwrap())
+            }
+            BodyFormat::AnthropicMessages => {
+                let obj = serde_json::json!({
+                    "type": "content_block_delta",
+                    "index": index,
+                    "delta": {"type": "input_json_delta", "partial_json": rest},
                 });
                 format!(
                     "event: content_block_delta\ndata: {}\n\n",
@@ -398,6 +509,59 @@ mod tests {
                 if let Some(c) = v["choices"][0]["delta"]["content"].as_str() {
                     joined.push_str(c);
                 }
+            }
+        }
+        joined
+    }
+
+    /// Concatenate all `tool_calls[].function.arguments` fragments for a given
+    /// tool-call index across the emitted OpenAI stream.
+    fn join_openai_tool_args(bytes: &[u8], want_index: u64) -> String {
+        let text = std::str::from_utf8(bytes).unwrap();
+        let mut joined = String::new();
+        for line in text.lines() {
+            let Some(payload) = data_payload(line) else {
+                continue;
+            };
+            if payload.trim() == "[DONE]" {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else {
+                continue;
+            };
+            let Some(calls) = v["choices"][0]["delta"]["tool_calls"].as_array() else {
+                continue;
+            };
+            for call in calls {
+                let idx = call["index"].as_u64().unwrap_or(0);
+                if idx == want_index
+                    && let Some(frag) = call["function"]["arguments"].as_str()
+                {
+                    joined.push_str(frag);
+                }
+            }
+        }
+        joined
+    }
+
+    /// Concatenate Anthropic `input_json_delta.partial_json` fragments for a
+    /// given content-block index.
+    fn join_anthropic_tool_input(bytes: &[u8], want_index: u64) -> String {
+        let text = std::str::from_utf8(bytes).unwrap();
+        let mut joined = String::new();
+        for line in text.lines() {
+            let Some(payload) = data_payload(line) else {
+                continue;
+            };
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) else {
+                continue;
+            };
+            if v["type"] == "content_block_delta"
+                && v["delta"]["type"] == "input_json_delta"
+                && v["index"].as_u64().unwrap_or(0) == want_index
+                && let Some(frag) = v["delta"]["partial_json"].as_str()
+            {
+                joined.push_str(frag);
             }
         }
         joined
@@ -590,5 +754,167 @@ mod tests {
         let synth_pos = s.find("one@x.com").expect("synthetic flush missing");
         let done_pos = s.find("[DONE]").expect("DONE missing");
         assert!(synth_pos < done_pos, "flush must precede DONE: {s}");
+    }
+
+    // ── tool-call argument streaming (the structural gap) ────────────────────
+
+    /// Build an OpenAI tool-call delta event with one argument fragment.
+    fn openai_arg_event(index: u64, frag: &str) -> String {
+        format!(
+            "data: {{\"id\":\"c1\",\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":{},\"function\":{{\"arguments\":{}}}}}]}}}}]}}\n\n",
+            index,
+            serde_json::to_string(frag).unwrap()
+        )
+    }
+
+    /// Placeholder split across argument fragments is reassembled and restored;
+    /// the joined arguments stay valid JSON carrying the real email.
+    #[test]
+    fn openai_tool_args_split_across_events() {
+        let mut t = SseRestorer::new(
+            fake_restorer(&[("EMAIL_1", "denis@example.com")]),
+            BodyFormat::OpenAiChat,
+        );
+        // {"to":" EMAIL _ 1 "}  → arguments span six events.
+        let frags = ["{\"to\":\"", "EMAIL", "_", "1", "\"}"];
+        let mut out = Vec::new();
+        for frag in frags {
+            out.extend_from_slice(&t.push(openai_arg_event(0, frag).as_bytes()));
+        }
+        out.extend_from_slice(&t.push(b"data: [DONE]\n\n"));
+        out.extend_from_slice(&t.finish());
+
+        let args = join_openai_tool_args(&out, 0);
+        assert!(!args.contains("EMAIL_1"), "placeholder leaked: {args}");
+        let parsed: serde_json::Value = serde_json::from_str(&args).unwrap();
+        assert_eq!(parsed["to"], "denis@example.com");
+    }
+
+    /// Two concurrent tool calls (distinct indices) must not cross-contaminate
+    /// each other's holdback.
+    #[test]
+    fn openai_tool_args_two_calls_no_cross_contamination() {
+        let mut t = SseRestorer::new(
+            fake_restorer(&[("EMAIL_1", "a@x.com"), ("EMAIL_2", "b@y.com")]),
+            BodyFormat::OpenAiChat,
+        );
+        let mut out = Vec::new();
+        // Interleave: call 0 ends on EMAIL_1, call 1 ends on EMAIL_2.
+        out.extend_from_slice(&t.push(openai_arg_event(0, "{\"to\":\"EMAIL").as_bytes()));
+        out.extend_from_slice(&t.push(openai_arg_event(1, "{\"to\":\"EMAIL").as_bytes()));
+        out.extend_from_slice(&t.push(openai_arg_event(0, "_1\"}").as_bytes()));
+        out.extend_from_slice(&t.push(openai_arg_event(1, "_2\"}").as_bytes()));
+        out.extend_from_slice(&t.push(b"data: [DONE]\n\n"));
+        out.extend_from_slice(&t.finish());
+
+        let a0: serde_json::Value = serde_json::from_str(&join_openai_tool_args(&out, 0)).unwrap();
+        let a1: serde_json::Value = serde_json::from_str(&join_openai_tool_args(&out, 1)).unwrap();
+        assert_eq!(a0["to"], "a@x.com");
+        assert_eq!(a1["to"], "b@y.com");
+    }
+
+    /// Trailing argument holdback (EMAIL_1 vs EMAIL_12 ambiguity) is flushed via
+    /// a synthetic tool-call event before [DONE].
+    #[test]
+    fn openai_tool_args_trailing_holdback_flushed_before_done() {
+        let mut t = SseRestorer::new(
+            fake_restorer(&[("EMAIL_1", "one@x.com"), ("EMAIL_12", "twelve@x.com")]),
+            BodyFormat::OpenAiChat,
+        );
+        let mut out = Vec::new();
+        // arguments end exactly on EMAIL_1 → held back (could become EMAIL_12).
+        out.extend_from_slice(&t.push(openai_arg_event(0, "{\"to\":\"EMAIL_1").as_bytes()));
+        out.extend_from_slice(&t.push(b"data: [DONE]\n\n"));
+        out.extend_from_slice(&t.finish());
+
+        let args = join_openai_tool_args(&out, 0);
+        assert_eq!(args, "{\"to\":\"one@x.com");
+        let s = std::str::from_utf8(&out).unwrap();
+        let flush_pos = s.find("one@x.com").expect("synthetic arg flush missing");
+        let done_pos = s.find("[DONE]").expect("DONE missing");
+        assert!(flush_pos < done_pos, "arg flush must precede DONE: {s}");
+    }
+
+    /// Content and tool-call arguments in the same response are restored on
+    /// their own independent holdback streams.
+    #[test]
+    fn openai_content_and_tool_args_independent() {
+        let mut t = SseRestorer::new(
+            fake_restorer(&[("EMAIL_1", "real@x.com")]),
+            BodyFormat::OpenAiChat,
+        );
+        let mut out = Vec::new();
+        out.extend_from_slice(
+            &t.push(b"data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"see EMAIL_1\"}}]}\n\n"),
+        );
+        out.extend_from_slice(&t.push(openai_arg_event(0, "{\"to\":\"EMAIL_1\"}").as_bytes()));
+        out.extend_from_slice(&t.push(b"data: [DONE]\n\n"));
+        out.extend_from_slice(&t.finish());
+
+        assert_eq!(join_openai_content(&out), "see real@x.com");
+        let args: serde_json::Value = serde_json::from_str(&join_openai_tool_args(&out, 0)).unwrap();
+        assert_eq!(args["to"], "real@x.com");
+    }
+
+    /// Byte-split invariance for a tool-call argument stream.
+    #[test]
+    fn openai_tool_args_independent_of_byte_chunking() {
+        let doc = concat!(
+            "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"to\\\":\\\"EMA\"}}]}}]}\n\n",
+            "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"IL_1\\\"}\"}}]}}]}\n\n",
+            "data: [DONE]\n\n",
+        )
+        .as_bytes();
+
+        let mut ref_t = SseRestorer::new(
+            fake_restorer(&[("EMAIL_1", "x@y.com")]),
+            BodyFormat::OpenAiChat,
+        );
+        let mut reference = ref_t.push(doc);
+        reference.extend_from_slice(&ref_t.finish());
+        let expected = join_openai_tool_args(&reference, 0);
+        assert_eq!(expected, "{\"to\":\"x@y.com\"}");
+
+        for split in 1..doc.len() {
+            let mut t = SseRestorer::new(
+                fake_restorer(&[("EMAIL_1", "x@y.com")]),
+                BodyFormat::OpenAiChat,
+            );
+            let mut out = t.push(&doc[..split]);
+            out.extend_from_slice(&t.push(&doc[split..]));
+            out.extend_from_slice(&t.finish());
+            assert_eq!(
+                join_openai_tool_args(&out, 0),
+                expected,
+                "byte split at {split} changed restored args"
+            );
+        }
+    }
+
+    /// Anthropic: tool input streams via `input_json_delta`; split placeholder
+    /// restored and flushed on message_stop.
+    #[test]
+    fn anthropic_tool_input_split_restored() {
+        let mut t = SseRestorer::new(
+            fake_restorer(&[("EMAIL_1", "denis@example.com")]),
+            BodyFormat::AnthropicMessages,
+        );
+        let mk = |txt: &str| {
+            format!(
+                "event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":1,\"delta\":{{\"type\":\"input_json_delta\",\"partial_json\":{}}}}}\n\n",
+                serde_json::to_string(txt).unwrap()
+            )
+        };
+        let mut out = Vec::new();
+        for frag in ["{\"to\":\"", "EMAIL", "_", "1", "\"}"] {
+            out.extend_from_slice(&t.push(mk(frag).as_bytes()));
+        }
+        out.extend_from_slice(&t.push(b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"));
+        out.extend_from_slice(&t.finish());
+
+        let input = join_anthropic_tool_input(&out, 1);
+        assert!(!input.contains("EMAIL_1"), "placeholder leaked: {input}");
+        let parsed: serde_json::Value = serde_json::from_str(&input).unwrap();
+        assert_eq!(parsed["to"], "denis@example.com");
     }
 }

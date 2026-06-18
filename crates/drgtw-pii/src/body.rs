@@ -173,6 +173,48 @@ fn restore_string_value(value: &mut serde_json::Value, map: &EntityMap) {
     }
 }
 
+/// Recursively restore placeholders in every JSON **string leaf** of `value`
+/// (object values and array elements walked; non-string scalars untouched).
+///
+/// Used for tool-call argument payloads, which are structured JSON whose string
+/// values (e.g. an email in `{"to":"EMAIL_1"}`) may carry placeholders.
+fn restore_json_strings(value: &mut serde_json::Value, map: &EntityMap) {
+    match value {
+        serde_json::Value::String(_) => restore_string_value(value, map),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                restore_json_strings(item, map);
+            }
+        }
+        serde_json::Value::Object(obj) => {
+            for v in obj.values_mut() {
+                restore_json_strings(v, map);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Restore placeholders inside an OpenAI tool-call `arguments` field.
+///
+/// `arguments` is a JSON document encoded **as a string**. We parse it, restore
+/// placeholders in its string leaves, and re-serialize — this keeps the result
+/// valid JSON regardless of what characters the restored value contains (serde
+/// re-escapes on serialize). If `arguments` is not valid JSON (a partial or
+/// malformed tool call), fall back to a best-effort restore on the raw string.
+fn restore_openai_tool_arguments(value: &mut serde_json::Value, map: &EntityMap) {
+    let Some(s) = value.as_str() else { return };
+    match serde_json::from_str::<serde_json::Value>(s) {
+        Ok(mut parsed) => {
+            restore_json_strings(&mut parsed, map);
+            if let Ok(reserialized) = serde_json::to_string(&parsed) {
+                *value = serde_json::Value::String(reserialized);
+            }
+        }
+        Err(_) => restore_string_value(value, map),
+    }
+}
+
 // ── OpenAI request ───────────────────────────────────────────────────────────
 
 /// Walk `body["messages"]` and rewrite text content.
@@ -412,26 +454,46 @@ fn restore_openai_response(body: &mut serde_json::Value, map: &EntityMap) {
         return;
     };
     for choice in choices {
-        if let Some(msg) = choice.get_mut("message")
-            && let Some(content) = msg.get_mut("content")
-        {
+        let Some(msg) = choice.get_mut("message") else {
+            continue;
+        };
+        if let Some(content) = msg.get_mut("content") {
             restore_string_value(content, map);
+        }
+        // Tool calls: restore placeholders inside each call's `arguments`.
+        if let Some(tool_calls) = msg.get_mut("tool_calls").and_then(|t| t.as_array_mut()) {
+            for call in tool_calls {
+                if let Some(args) = call.get_mut("function").and_then(|f| f.get_mut("arguments")) {
+                    restore_openai_tool_arguments(args, map);
+                }
+            }
         }
     }
 }
 
 // ── Anthropic response ───────────────────────────────────────────────────────
 
-/// Restore `content[].text` for blocks with `type == "text"`.
+/// Restore `content[].text` for `type == "text"` blocks and `content[].input`
+/// for `type == "tool_use"` blocks.
 fn restore_anthropic_response(body: &mut serde_json::Value, map: &EntityMap) {
     let Some(blocks) = body.get_mut("content").and_then(|c| c.as_array_mut()) else {
         return;
     };
     for block in blocks {
-        if block.get("type").and_then(|t| t.as_str()) == Some("text")
-            && let Some(text_field) = block.get_mut("text")
-        {
-            restore_string_value(text_field, map);
+        match block.get("type").and_then(|t| t.as_str()) {
+            Some("text") => {
+                if let Some(text_field) = block.get_mut("text") {
+                    restore_string_value(text_field, map);
+                }
+            }
+            // `input` is already a parsed JSON object (not a string), so walk
+            // its string leaves directly.
+            Some("tool_use") => {
+                if let Some(input) = block.get_mut("input") {
+                    restore_json_strings(input, map);
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -493,30 +555,81 @@ fn store_restore_string_value(value: &mut serde_json::Value, store: &dyn EntityS
     }
 }
 
-/// Store-restore `choices[].message.content` for past-request placeholders.
+/// Recursively store-restore every JSON string leaf of `value`.
+fn store_restore_json_strings(value: &mut serde_json::Value, store: &dyn EntityStore) {
+    match value {
+        serde_json::Value::String(_) => store_restore_string_value(value, store),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                store_restore_json_strings(item, store);
+            }
+        }
+        serde_json::Value::Object(obj) => {
+            for v in obj.values_mut() {
+                store_restore_json_strings(v, store);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Store-restore an OpenAI tool-call `arguments` field (JSON-encoded string).
+/// Mirrors [`restore_openai_tool_arguments`] for the past-request store pass.
+fn store_restore_openai_tool_arguments(value: &mut serde_json::Value, store: &dyn EntityStore) {
+    let Some(s) = value.as_str() else { return };
+    match serde_json::from_str::<serde_json::Value>(s) {
+        Ok(mut parsed) => {
+            store_restore_json_strings(&mut parsed, store);
+            if let Ok(reserialized) = serde_json::to_string(&parsed) {
+                *value = serde_json::Value::String(reserialized);
+            }
+        }
+        Err(_) => store_restore_string_value(value, store),
+    }
+}
+
+/// Store-restore `choices[].message.content` and tool-call arguments for
+/// past-request placeholders.
 fn store_restore_openai_response(body: &mut serde_json::Value, store: &dyn EntityStore) {
     let Some(choices) = body.get_mut("choices").and_then(|c| c.as_array_mut()) else {
         return;
     };
     for choice in choices {
-        if let Some(msg) = choice.get_mut("message")
-            && let Some(content) = msg.get_mut("content")
-        {
+        let Some(msg) = choice.get_mut("message") else {
+            continue;
+        };
+        if let Some(content) = msg.get_mut("content") {
             store_restore_string_value(content, store);
+        }
+        if let Some(tool_calls) = msg.get_mut("tool_calls").and_then(|t| t.as_array_mut()) {
+            for call in tool_calls {
+                if let Some(args) = call.get_mut("function").and_then(|f| f.get_mut("arguments")) {
+                    store_restore_openai_tool_arguments(args, store);
+                }
+            }
         }
     }
 }
 
-/// Store-restore `content[].text` for past-request placeholders.
+/// Store-restore `content[].text` and `content[].input` (tool_use) for
+/// past-request placeholders.
 fn store_restore_anthropic_response(body: &mut serde_json::Value, store: &dyn EntityStore) {
     let Some(blocks) = body.get_mut("content").and_then(|c| c.as_array_mut()) else {
         return;
     };
     for block in blocks {
-        if block.get("type").and_then(|t| t.as_str()) == Some("text")
-            && let Some(text_field) = block.get_mut("text")
-        {
-            store_restore_string_value(text_field, store);
+        match block.get("type").and_then(|t| t.as_str()) {
+            Some("text") => {
+                if let Some(text_field) = block.get_mut("text") {
+                    store_restore_string_value(text_field, store);
+                }
+            }
+            Some("tool_use") => {
+                if let Some(input) = block.get_mut("input") {
+                    store_restore_json_strings(input, store);
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -767,6 +880,142 @@ mod tests {
             original["usage"]["total_tokens"]
         );
         assert_eq!(body["choices"][0]["message"]["index"], 0);
+    }
+
+    // ── tool-call argument restore (the structural gap) ──────────────────────
+
+    fn map_with_email(email: &str) -> EntityMap {
+        let mut map = EntityMap::new();
+        map.pseudonymize(
+            email,
+            &[Detection {
+                start: 0,
+                end: email.len(),
+                kind: EntityKind::Email,
+            }],
+        );
+        map
+    }
+
+    #[test]
+    fn restore_openai_tool_call_arguments() {
+        let map = map_with_email("denis@example.com");
+        let mut body = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": serde_json::Value::Null,
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "send_email",
+                            "arguments": "{\"to\":\"EMAIL_1\",\"subject\":\"hi\"}"
+                        }
+                    }]
+                }
+            }]
+        });
+        restore_body(BodyFormat::OpenAiChat, &mut body, &map);
+        let args = body["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .unwrap();
+        // Result must still be valid JSON and carry the real email.
+        let parsed: serde_json::Value = serde_json::from_str(args).unwrap();
+        assert_eq!(parsed["to"], "denis@example.com");
+        assert_eq!(parsed["subject"], "hi");
+        assert!(!args.contains("EMAIL_1"), "placeholder leaked: {args}");
+    }
+
+    #[test]
+    fn restore_openai_tool_call_arguments_nested() {
+        let map = map_with_email("a@b.com");
+        let mut body = json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [{
+                        "function": {
+                            "name": "f",
+                            "arguments": "{\"cc\":[\"EMAIL_1\"],\"meta\":{\"reply_to\":\"EMAIL_1\"}}"
+                        }
+                    }]
+                }
+            }]
+        });
+        restore_body(BodyFormat::OpenAiChat, &mut body, &map);
+        let args = body["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(args).unwrap();
+        assert_eq!(parsed["cc"][0], "a@b.com");
+        assert_eq!(parsed["meta"]["reply_to"], "a@b.com");
+    }
+
+    #[test]
+    fn restore_openai_tool_call_arguments_value_needs_escaping() {
+        // Original value contains a quote: re-serialization must keep the
+        // arguments string valid JSON.
+        let mut map = EntityMap::new();
+        let original = r#"O'Brien "Bob""#;
+        map.pseudonymize(
+            original,
+            &[Detection {
+                start: 0,
+                end: original.len(),
+                kind: EntityKind::Person,
+            }],
+        );
+        let mut body = json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [{
+                        "function": {"name": "f", "arguments": "{\"name\":\"PERSON_1\"}"}
+                    }]
+                }
+            }]
+        });
+        restore_body(BodyFormat::OpenAiChat, &mut body, &map);
+        let args = body["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(args).unwrap();
+        assert_eq!(parsed["name"], original);
+    }
+
+    #[test]
+    fn restore_openai_tool_call_arguments_invalid_json_best_effort() {
+        let map = map_with_email("a@b.com");
+        // Malformed/partial arguments: still restore the placeholder verbatim.
+        let mut body = json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [{
+                        "function": {"name": "f", "arguments": "to=EMAIL_1 (partial"}
+                    }]
+                }
+            }]
+        });
+        restore_body(BodyFormat::OpenAiChat, &mut body, &map);
+        assert_eq!(
+            body["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"],
+            "to=a@b.com (partial"
+        );
+    }
+
+    #[test]
+    fn restore_anthropic_tool_use_input() {
+        let map = map_with_email("denis@example.com");
+        let mut body = json!({
+            "content": [
+                {"type": "text", "text": "Sending to EMAIL_1"},
+                {"type": "tool_use", "id": "t1", "name": "send_email",
+                 "input": {"to": "EMAIL_1", "cc": ["EMAIL_1"]}}
+            ]
+        });
+        restore_body(BodyFormat::AnthropicMessages, &mut body, &map);
+        assert_eq!(body["content"][0]["text"], "Sending to denis@example.com");
+        assert_eq!(body["content"][1]["input"]["to"], "denis@example.com");
+        assert_eq!(body["content"][1]["input"]["cc"][0], "denis@example.com");
     }
 
     // ── pseudonymize_body integration tests (require PiiEngine::from_config) ──
