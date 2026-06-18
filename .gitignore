@@ -26,3 +26,6 @@ traces/
 # Local demo overrides (internal resource names)
 demo/*.local.toml
 demo/compose.override.yml
+
+# Tailwind standalone CLI (build tool, platform-specific binary)
+crates/drgtw-ui/tailwindcss
