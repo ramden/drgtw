@@ -1,0 +1,12 @@
+[package]
+name = "drgtw-guardrails"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+drgtw-config.workspace = true
+drgtw-pii.workspace = true
+regex.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

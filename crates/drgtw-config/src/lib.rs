@@ -57,6 +57,10 @@ pub struct Config {
     /// history/audit nav — the concept opens no Postgres connection.
     #[serde(default)]
     pub ui: UiConfig,
+    /// Content guardrails applied to request/response text (pre/post upstream).
+    /// Defaults to empty (no guardrails). See [`GuardrailsConfig`].
+    #[serde(default)]
+    pub guardrails: GuardrailsConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -208,6 +212,19 @@ pub struct PiiConfig {
     /// Additional regex-based recognizers.
     #[serde(default)]
     pub custom_recognizers: Vec<CustomRecognizer>,
+    /// Optional allow-list of entity kinds to keep. Names are presidio-style and
+    /// case-insensitive: `PERSON`, `LOCATION`, `ORGANIZATION`, `EMAIL_ADDRESS`
+    /// (alias `EMAIL`), `PHONE_NUMBER` (alias `PHONE`), `CREDIT_CARD` (alias
+    /// `CC`), `IBAN_CODE` (alias `IBAN`), `IP_ADDRESS`, `DATE_TIME` (alias
+    /// `DATE`), `NATIONAL_ID`, `NRP`, plus any `custom_recognizers` name.
+    ///
+    /// When absent (`None`), every detected kind is kept (backward compatible).
+    /// When present, detections are filtered to the listed kinds **after** the
+    /// recognizers run — recognizers still execute, only their output is
+    /// filtered. An empty list is rejected at validation (use `disabled_pii`
+    /// semantics instead of an empty allow-list).
+    #[serde(default)]
+    pub entities: Option<Vec<String>>,
     /// Optional NER (named-entity recognition) configuration. When absent,
     /// NER is not loaded. When present, `model_dir` is required.
     #[serde(default)]
@@ -225,6 +242,16 @@ pub struct PiiConfig {
     /// absent in development.
     #[serde(default)]
     pub embeddings_require_vault: bool,
+    /// Fail boot when the PII pipeline is enabled but no `[pii.ner]` model is
+    /// configured. Defaults to `false` (a boot *warning* is logged instead).
+    ///
+    /// Set `true` for GDPR-grade deployments that must never start in a state
+    /// where person/organization/location names reach the upstream provider in
+    /// clear text: with `enabled_by_default = true` and no NER model, boot is
+    /// rejected rather than silently masking only structured identifiers. This
+    /// is the hard-fail counterpart to [`PiiConfig::names_leak_without_ner`].
+    #[serde(default)]
+    pub require_ner: bool,
 }
 
 /// Persistent encrypted entity-vault configuration (WP 9.1).
@@ -308,15 +335,163 @@ impl Default for PiiConfig {
             enabled_by_default: default_pii_enabled(),
             disabled_recognizers: Vec::new(),
             custom_recognizers: Vec::new(),
+            entities: None,
             ner: None,
             vault: None,
             embeddings_require_vault: false,
+            require_ner: false,
         }
+    }
+}
+
+impl PiiConfig {
+    /// `true` when the PII pipeline is on by default but no NER model is
+    /// configured — so person/organization/location names pass through to the
+    /// upstream provider in clear text. The binary logs a warning on this at
+    /// boot, since for GDPR-grade deployments it is almost always a
+    /// misconfiguration (the most common personal data — names + locations —
+    /// is the data that leaks).
+    pub fn names_leak_without_ner(&self) -> bool {
+        self.enabled_by_default && self.ner.is_none()
     }
 }
 
 fn default_pii_enabled() -> bool {
     true
+}
+
+/// Canonical built-in PII entity names accepted in `pii.entities` and a
+/// `contact_info` guardrail's `entities` list. These are the presidio-style
+/// names a deployment writes in TOML.
+pub const KNOWN_PII_ENTITY_NAMES: &[&str] = &[
+    "PERSON",
+    "LOCATION",
+    "ORGANIZATION",
+    "EMAIL_ADDRESS",
+    "PHONE_NUMBER",
+    "CREDIT_CARD",
+    "IBAN_CODE",
+    "IP_ADDRESS",
+    "DATE_TIME",
+    "NATIONAL_ID",
+    "NRP",
+];
+
+/// Map a user-supplied entity name to its canonical form (case-insensitive,
+/// alias-aware), or `None` if it is not a known built-in entity.
+///
+/// Aliases: `EMAIL`→`EMAIL_ADDRESS`, `PHONE`→`PHONE_NUMBER`,
+/// `CC`/`CARD`→`CREDIT_CARD`, `IBAN`→`IBAN_CODE`, `ORG`→`ORGANIZATION`,
+/// `LOC`→`LOCATION`, `IP`→`IP_ADDRESS`, `DATE`/`DATETIME`→`DATE_TIME`.
+///
+/// Custom-recognizer names are validated separately (they are not built-ins).
+pub fn canonical_pii_entity_name(name: &str) -> Option<&'static str> {
+    let canon = match name.trim().to_ascii_uppercase().as_str() {
+        "PERSON" => "PERSON",
+        "LOCATION" | "LOC" => "LOCATION",
+        "ORGANIZATION" | "ORG" => "ORGANIZATION",
+        "EMAIL_ADDRESS" | "EMAIL" => "EMAIL_ADDRESS",
+        "PHONE_NUMBER" | "PHONE" => "PHONE_NUMBER",
+        "CREDIT_CARD" | "CC" | "CARD" => "CREDIT_CARD",
+        "IBAN_CODE" | "IBAN" => "IBAN_CODE",
+        "IP_ADDRESS" | "IP" => "IP_ADDRESS",
+        "DATE_TIME" | "DATETIME" | "DATE" => "DATE_TIME",
+        "NATIONAL_ID" => "NATIONAL_ID",
+        "NRP" => "NRP",
+        _ => return None,
+    };
+    Some(canon)
+}
+
+/// Content-guardrail configuration. TOML shape:
+///
+/// ```toml
+/// [[guardrails.rules]]
+/// name = "no-jailbreaks"
+/// kind = "prompt_injection"   # prompt_injection | banned_content | contact_info
+/// phase = "pre"               # pre | post | both   (default: kind-appropriate)
+/// action = "block"            # block | redact | flag
+/// patterns = ["(?i)ignore .* instructions"]   # extra regexes (banned_content/prompt_injection)
+/// entities = ["EMAIL_ADDRESS", "PHONE_NUMBER"] # which kinds to act on (contact_info)
+/// ```
+///
+/// Absent or empty `rules` = no guardrails (backward compatible).
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+pub struct GuardrailsConfig {
+    /// Ordered list of guardrail rules. Evaluated in order; the first `Block`
+    /// short-circuits.
+    #[serde(default)]
+    pub rules: Vec<GuardrailRule>,
+}
+
+impl GuardrailsConfig {
+    /// `true` when no guardrails are configured (engine build is skipped).
+    pub fn is_empty(&self) -> bool {
+        self.rules.is_empty()
+    }
+}
+
+/// A single guardrail rule.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct GuardrailRule {
+    /// Operator-facing name (appears in logs/traces when the rule fires).
+    pub name: String,
+    /// Which built-in guardrail backs this rule.
+    pub kind: GuardrailKind,
+    /// Whether the rule runs on the request, the response, or both.
+    #[serde(default)]
+    pub phase: GuardrailPhase,
+    /// What to do when the rule matches.
+    #[serde(default)]
+    pub action: GuardrailAction,
+    /// Extra regex patterns. Used by `prompt_injection` (appended to the
+    /// built-in heuristics) and `banned_content` (the blocklist). Ignored by
+    /// `contact_info`.
+    #[serde(default)]
+    pub patterns: Vec<String>,
+    /// Entity kinds to act on. Used by `contact_info` (presidio-style names, as
+    /// in [`PiiConfig::entities`]). Ignored by the other kinds. Empty = a
+    /// sensible default set chosen by the guardrail.
+    #[serde(default)]
+    pub entities: Vec<String>,
+}
+
+/// Built-in guardrail kinds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuardrailKind {
+    /// Heuristic prompt-injection / jailbreak detection on request text.
+    PromptInjection,
+    /// Operator-defined blocklist (regex) for NSFW / disallowed content.
+    BannedContent,
+    /// Contact-info / national-identifier detection (reuses the PII detectors).
+    ContactInfo,
+}
+
+/// When a guardrail rule runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum GuardrailPhase {
+    /// On the request, before the upstream call. Default.
+    #[default]
+    Pre,
+    /// On the (non-streaming) response, after the upstream call.
+    Post,
+    /// On both request and response.
+    Both,
+}
+
+/// What a guardrail does when it matches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum GuardrailAction {
+    /// Reject the request/response with a content-filter error. Default.
+    #[default]
+    Block,
+    /// Replace the matching spans with a placeholder and continue.
+    Redact,
+    /// Log/trace the match and continue unchanged.
+    Flag,
 }
 
 /// Behaviour when NER inference fails.
@@ -653,6 +828,24 @@ impl Config {
 /// - `${VAR}` references in `api_key` resolved from the environment;
 ///   unset vars are a hard error
 pub fn load(path: &Path) -> Result<Config, ConfigError> {
+    load_strict(path, false)
+}
+
+/// Like [`load`], but controls how **unknown** TOML keys are handled.
+///
+/// drgtw's config is not `deny_unknown_fields`, so a misplaced or misspelled
+/// key (e.g. a `[ner]` table written instead of `[pii.ner]`, or `score_threshold`
+/// at the `[pii]` level instead of under `[pii.ner]`) would otherwise be
+/// silently ignored — a dangerous failure mode for PII settings, where a
+/// dropped key means data leaks unmasked.
+///
+/// - `strict = false` (the default via [`load`]): unknown keys are logged as a
+///   `warn!` and loading proceeds.
+/// - `strict = true` (the `--strict-config` flag): any unknown key is a hard
+///   [`ConfigError::Invalid`] and boot fails.
+///
+/// Key paths are reported dotted, e.g. `pii.scrore_threshold` or `ner.model_dir`.
+pub fn load_strict(path: &Path, strict: bool) -> Result<Config, ConfigError> {
     let path_str = path.display().to_string();
 
     // 1. Read file.
@@ -661,11 +854,31 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
         source: e,
     })?;
 
-    // 2. Parse TOML.
-    let mut config: Config = toml::from_str(&raw).map_err(|e| ConfigError::Parse {
+    // 2. Parse TOML, collecting any keys that no field consumed.
+    let mut unknown_keys: Vec<String> = Vec::new();
+    let de = toml::Deserializer::new(&raw);
+    let mut config: Config = serde_ignored::deserialize(de, |key_path| {
+        unknown_keys.push(key_path.to_string());
+    })
+    .map_err(|e| ConfigError::Parse {
         path: path_str.clone(),
         source: e,
     })?;
+
+    // 2b. Surface unknown keys. Warn by default; hard-fail under --strict-config.
+    if !unknown_keys.is_empty() {
+        let joined = unknown_keys.join(", ");
+        if strict {
+            return Err(ConfigError::Invalid(format!(
+                "unknown config key(s) in `{path_str}`: {joined} (rejected by --strict-config)"
+            )));
+        }
+        tracing::warn!(
+            keys = %joined,
+            "ignoring unknown config key(s) — check for typos or misplaced sections; \
+             run with --strict-config to make this a hard error"
+        );
+    }
 
     // 3. Env-var resolution on connections.
     for conn in &mut config.connections {
@@ -882,6 +1095,210 @@ mod tests {
         let mut f = NamedTempFile::new().expect("tempfile");
         f.write_all(content.as_bytes()).expect("write");
         load(f.path())
+    }
+
+    // Helper: write TOML to a temp file and call load_strict().
+    fn load_toml_strict(content: &str, strict: bool) -> Result<Config, ConfigError> {
+        let mut f = NamedTempFile::new().expect("tempfile");
+        f.write_all(content.as_bytes()).expect("write");
+        load_strict(f.path(), strict)
+    }
+
+    // -----------------------------------------------------------------------
+    // PII entities allow-list (v0.0.8)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_pii_entities_absent_defaults_none() {
+        let cfg = load_toml("[pii]\nenabled_by_default = true\n").expect("valid");
+        assert!(cfg.pii.entities.is_none());
+    }
+
+    #[test]
+    fn test_pii_entities_valid_subset_with_aliases() {
+        let cfg = load_toml(
+            "[pii]\nentities = [\"PERSON\", \"EMAIL\", \"ip_address\", \"DATE\"]\n",
+        )
+        .expect("valid");
+        assert_eq!(
+            cfg.pii.entities.as_deref(),
+            Some(["PERSON", "EMAIL", "ip_address", "DATE"].map(String::from).as_slice())
+        );
+    }
+
+    #[test]
+    fn test_pii_entities_invalid_name_rejected() {
+        let err = load_toml("[pii]\nentities = [\"PERSON\", \"NONSENSE\"]\n").unwrap_err();
+        match err {
+            ConfigError::Invalid(m) => assert!(m.contains("NONSENSE"), "{m}"),
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_pii_entities_empty_list_rejected() {
+        let err = load_toml("[pii]\nentities = []\n").unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid(_)));
+    }
+
+    #[test]
+    fn test_pii_entities_accepts_custom_recognizer_name() {
+        let toml = "[pii]\nentities = [\"PERSON\", \"ticket\"]\n\
+                    [[pii.custom_recognizers]]\nname = \"ticket\"\npattern = \"TKT-\\\\d+\"\n";
+        let cfg = load_toml(toml).expect("custom recognizer name is a valid entity");
+        assert!(cfg.pii.entities.is_some());
+    }
+
+    #[test]
+    fn test_canonical_pii_entity_name_aliases() {
+        assert_eq!(canonical_pii_entity_name("email"), Some("EMAIL_ADDRESS"));
+        assert_eq!(canonical_pii_entity_name("CC"), Some("CREDIT_CARD"));
+        assert_eq!(canonical_pii_entity_name("org"), Some("ORGANIZATION"));
+        assert_eq!(canonical_pii_entity_name("IP"), Some("IP_ADDRESS"));
+        assert_eq!(canonical_pii_entity_name("date_time"), Some("DATE_TIME"));
+        assert_eq!(canonical_pii_entity_name("unknown"), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // require_ner (v0.0.8)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_require_ner_without_ner_block_rejected() {
+        let err = load_toml("[pii]\nenabled_by_default = true\nrequire_ner = true\n").unwrap_err();
+        match err {
+            ConfigError::Invalid(m) => assert!(m.contains("require_ner"), "{m}"),
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_require_ner_with_ner_block_ok() {
+        let toml = "[pii]\nrequire_ner = true\n[pii.ner]\nmodel_dir = \"models/ner\"\n";
+        let cfg = load_toml(toml).expect("require_ner satisfied by [pii.ner]");
+        assert!(cfg.pii.require_ner);
+    }
+
+    #[test]
+    fn test_names_leak_without_ner_flag() {
+        let leaky = load_toml("[pii]\nenabled_by_default = true\n").unwrap();
+        assert!(leaky.pii.names_leak_without_ner());
+        let safe = load_toml("[pii]\nenabled_by_default = false\n").unwrap();
+        assert!(!safe.pii.names_leak_without_ner());
+    }
+
+    // -----------------------------------------------------------------------
+    // Strict-config / unknown keys (v0.0.8)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_unknown_key_warns_by_default() {
+        // Misplaced `score_threshold` at [pii] level (belongs under [pii.ner]).
+        let cfg = load_toml_strict("[pii]\nscore_threshold = 0.7\n", false)
+            .expect("unknown key only warns when not strict");
+        // The stray key is ignored; the rest loads.
+        assert!(cfg.pii.enabled_by_default);
+    }
+
+    #[test]
+    fn test_unknown_key_rejected_in_strict_mode() {
+        let err = load_toml_strict("[pii]\nscore_threshold = 0.7\n", true).unwrap_err();
+        match err {
+            ConfigError::Invalid(m) => {
+                assert!(m.contains("unknown config key"), "{m}");
+                assert!(m.contains("score_threshold"), "{m}");
+            }
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_unknown_section_rejected_in_strict_mode() {
+        // The real leak path: a misplaced `[ner]` table instead of `[pii.ner]`.
+        let err = load_toml_strict("[ner]\nmodel_dir = \"models/ner\"\n", true).unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid(_)));
+    }
+
+    #[test]
+    fn test_known_config_passes_strict_mode() {
+        let toml = "[pii]\nenabled_by_default = true\n[pii.ner]\nmodel_dir = \"models/ner\"\n";
+        load_toml_strict(toml, true).expect("all-known config passes strict mode");
+    }
+
+    // -----------------------------------------------------------------------
+    // Guardrails (v0.0.8)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_guardrails_absent_defaults_empty() {
+        let cfg = load_toml("[pii]\nenabled_by_default = true\n").unwrap();
+        assert!(cfg.guardrails.is_empty());
+    }
+
+    #[test]
+    fn test_guardrails_rules_parse() {
+        let toml = "\
+[[guardrails.rules]]
+name = \"block-jailbreaks\"
+kind = \"prompt_injection\"
+phase = \"pre\"
+action = \"block\"
+
+[[guardrails.rules]]
+name = \"redact-contact\"
+kind = \"contact_info\"
+phase = \"post\"
+action = \"redact\"
+entities = [\"EMAIL_ADDRESS\", \"PHONE_NUMBER\"]
+";
+        let cfg = load_toml(toml).expect("valid guardrails");
+        assert_eq!(cfg.guardrails.rules.len(), 2);
+        assert_eq!(cfg.guardrails.rules[0].kind, GuardrailKind::PromptInjection);
+        assert_eq!(cfg.guardrails.rules[0].phase, GuardrailPhase::Pre);
+        assert_eq!(cfg.guardrails.rules[0].action, GuardrailAction::Block);
+        assert_eq!(cfg.guardrails.rules[1].kind, GuardrailKind::ContactInfo);
+        assert_eq!(cfg.guardrails.rules[1].action, GuardrailAction::Redact);
+    }
+
+    #[test]
+    fn test_guardrails_defaults_phase_pre_action_block() {
+        let toml = "[[guardrails.rules]]\nname = \"g\"\nkind = \"banned_content\"\npatterns = [\"x\"]\n";
+        let cfg = load_toml(toml).unwrap();
+        assert_eq!(cfg.guardrails.rules[0].phase, GuardrailPhase::Pre);
+        assert_eq!(cfg.guardrails.rules[0].action, GuardrailAction::Block);
+    }
+
+    #[test]
+    fn test_guardrails_empty_name_rejected() {
+        let toml = "[[guardrails.rules]]\nname = \"\"\nkind = \"prompt_injection\"\n";
+        assert!(matches!(load_toml(toml), Err(ConfigError::Invalid(_))));
+    }
+
+    #[test]
+    fn test_guardrails_duplicate_name_rejected() {
+        let toml = "\
+[[guardrails.rules]]
+name = \"dup\"
+kind = \"prompt_injection\"
+[[guardrails.rules]]
+name = \"dup\"
+kind = \"banned_content\"
+patterns = [\"x\"]
+";
+        assert!(matches!(load_toml(toml), Err(ConfigError::Invalid(_))));
+    }
+
+    #[test]
+    fn test_guardrails_contact_info_unknown_entity_rejected() {
+        let toml = "[[guardrails.rules]]\nname = \"g\"\nkind = \"contact_info\"\nentities = [\"WAT\"]\n";
+        assert!(matches!(load_toml(toml), Err(ConfigError::Invalid(_))));
+    }
+
+    #[test]
+    fn test_guardrails_unknown_kind_rejected() {
+        // Unknown enum variant → TOML parse error (serde rejects it).
+        let toml = "[[guardrails.rules]]\nname = \"g\"\nkind = \"telepathy\"\n";
+        assert!(matches!(load_toml(toml), Err(ConfigError::Parse { .. })));
     }
 
     // -----------------------------------------------------------------------

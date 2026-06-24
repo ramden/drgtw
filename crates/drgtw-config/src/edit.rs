@@ -383,6 +383,9 @@ pub fn restart_required_changes(old: &Config, new: &Config) -> Vec<&'static str>
     if !configs_mcp_servers_eq(old, new) {
         changed.push("mcp_servers");
     }
+    if old.guardrails != new.guardrails {
+        changed.push("guardrails");
+    }
 
     changed
 }
@@ -446,6 +449,8 @@ fn configs_pii_eq(a: &Config, b: &Config) -> bool {
     a.pii.enabled_by_default == b.pii.enabled_by_default
         && a.pii.disabled_recognizers == b.pii.disabled_recognizers
         && a.pii.embeddings_require_vault == b.pii.embeddings_require_vault
+        && a.pii.require_ner == b.pii.require_ner
+        && a.pii.entities == b.pii.entities
         && custom_recognizers_eq(&a.pii.custom_recognizers, &b.pii.custom_recognizers)
         && ner_config_eq(&a.pii.ner, &b.pii.ner)
 }
@@ -727,7 +732,41 @@ pub(crate) fn validate_inner(config: &Config, ui_mode: bool) -> Result<(), Confi
         }
     }
 
+    // --- PII entities allow-list ---
+    if let Some(entities) = &config.pii.entities {
+        if entities.is_empty() {
+            return Err(ConfigError::Invalid(
+                "pii.entities must not be an empty list — omit the key to keep all \
+                 entity kinds, or list at least one"
+                    .to_owned(),
+            ));
+        }
+        for name in entities {
+            // A name is valid if it is a known built-in entity OR matches a
+            // declared custom recognizer (case-insensitive, since custom
+            // placeholders are uppercased).
+            let is_custom = rec_names
+                .iter()
+                .any(|rn| rn.eq_ignore_ascii_case(name.trim()));
+            if crate::canonical_pii_entity_name(name).is_none() && !is_custom {
+                return Err(ConfigError::Invalid(format!(
+                    "pii.entities contains unknown entity `{name}` — expected one of {:?} \
+                     (case-insensitive) or a declared custom_recognizers name",
+                    crate::KNOWN_PII_ENTITY_NAMES
+                )));
+            }
+        }
+    }
+
     // --- PII NER ---
+    if config.pii.require_ner && config.pii.ner.is_none() {
+        return Err(ConfigError::Invalid(
+            "pii.require_ner = true but no [pii.ner] model is configured — person/\
+             organization/location names would reach the upstream provider unmasked. \
+             Configure [pii.ner].model_dir or set require_ner = false"
+                .to_owned(),
+        ));
+    }
     if let Some(ner) = &config.pii.ner {
         if ner.model_dir.is_empty() {
             return Err(ConfigError::Invalid(
@@ -774,6 +813,47 @@ pub(crate) fn validate_inner(config: &Config, ui_mode: bool) -> Result<(), Confi
                 return Err(ConfigError::Invalid(
                     "pii.vault.key must be 64 hex characters".to_owned(),
                 ));
+            }
+        }
+    }
+
+    // --- Guardrails ---
+    {
+        let mut gr_names: HashSet<&str> = HashSet::new();
+        for (i, rule) in config.guardrails.rules.iter().enumerate() {
+            if rule.name.trim().is_empty() {
+                return Err(ConfigError::Invalid(format!(
+                    "guardrails.rules[{i}].name must not be empty"
+                )));
+            }
+            if !gr_names.insert(rule.name.as_str()) {
+                return Err(ConfigError::Invalid(format!(
+                    "duplicate guardrails.rules name `{}`",
+                    rule.name
+                )));
+            }
+            // contact_info acts on entity kinds; the others use regex patterns.
+            match rule.kind {
+                crate::GuardrailKind::ContactInfo => {
+                    for name in &rule.entities {
+                        if crate::canonical_pii_entity_name(name).is_none() {
+                            return Err(ConfigError::Invalid(format!(
+                                "guardrails.rules[`{}`].entities contains unknown entity `{name}`",
+                                rule.name
+                            )));
+                        }
+                    }
+                }
+                crate::GuardrailKind::PromptInjection | crate::GuardrailKind::BannedContent => {
+                    for pat in &rule.patterns {
+                        if pat.is_empty() {
+                            return Err(ConfigError::Invalid(format!(
+                                "guardrails.rules[`{}`] has an empty pattern",
+                                rule.name
+                            )));
+                        }
+                    }
+                }
             }
         }
     }

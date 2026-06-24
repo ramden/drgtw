@@ -161,6 +161,7 @@ async fn event_sink_adds_signature_header_when_secret_set() {
         model_aliases: Default::default(),
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     });
 
     let state = Arc::new(
@@ -238,6 +239,7 @@ async fn event_sink_no_signature_header_when_secret_absent() {
         model_aliases: Default::default(),
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     });
 
     let state = Arc::new(
@@ -314,9 +316,11 @@ async fn pii_request_sets_pii_flag_in_usage_event() {
             enabled_by_default: true,
             disabled_recognizers: vec![],
             custom_recognizers: vec![],
+            entities: None,
             ner: None,
             vault: None,
             embeddings_require_vault: false,
+            require_ner: false,
         },
         events: Some(EventsConfig {
             url: format!("{}/events", sink.uri()),
@@ -331,6 +335,7 @@ async fn pii_request_sets_pii_flag_in_usage_event() {
         model_aliases: Default::default(),
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     });
 
     let state = Arc::new(
@@ -395,6 +400,7 @@ async fn non_pii_request_pii_flag_false() {
         model_aliases: Default::default(),
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     });
 
     let state = Arc::new(

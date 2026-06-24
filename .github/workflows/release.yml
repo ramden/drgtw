@@ -175,3 +175,85 @@ jobs:
         run: |
           docker buildx imagetools inspect \
             ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+
+  # ---------------------------------------------------------------------------
+  # Model-bundled image variant: <user>/drgtw:<version>-models
+  #
+  # Layers the multilingual NER model on top of the slim image just pushed by
+  # `merge`, so PERSON/ORG/LOCATION masking works with no volume mount. The
+  # model is NOT in the repo (gitignored); CI downloads it from the repo
+  # variable NER_MODEL_URL (a .tar.gz of model_quantized.onnx + tokenizer.json
+  # + config.json). The job is SKIPPED when NER_MODEL_URL is unset — the slim
+  # image still ships; only the -models variant is omitted.
+  # ---------------------------------------------------------------------------
+  models:
+    name: Build model-bundled image
+    runs-on: ubuntu-latest
+    needs: merge
+    if: ${{ vars.NER_MODEL_URL != '' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Stage the model into models-dist/ner-multilingual for Dockerfile.models.
+      # Accepts a tarball that either contains a top-level ner-multilingual/ dir
+      # or the three files at the archive root.
+      - name: Download and stage NER model
+        run: |
+          set -euo pipefail
+          mkdir -p _model_dl models-dist
+          curl -fsSL "${NER_MODEL_URL}" -o _model_dl/model.tar.gz
+          tar -xzf _model_dl/model.tar.gz -C _model_dl
+          src="$(dirname "$(find _model_dl -name 'model_quantized.onnx' -o -name 'model.onnx' | head -n1)")"
+          if [ -z "${src}" ] || [ ! -d "${src}" ]; then
+            echo "::error::no model_quantized.onnx/model.onnx found in NER_MODEL_URL archive"; exit 1
+          fi
+          rm -rf models-dist/ner-multilingual
+          cp -r "${src}" models-dist/ner-multilingual
+          echo "Staged model files:"; ls -l models-dist/ner-multilingual
+        env:
+          NER_MODEL_URL: ${{ vars.NER_MODEL_URL }}
+
+      # Image version = git tag without the leading `v` (matches the slim
+      # image's semver {{version}} tag, e.g. v0.0.8-alpha -> 0.0.8-alpha).
+      - name: Resolve base image version
+        run: echo "BASE_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # Same version as the slim image, with a `-models` suffix on every tag.
+      - name: Extract metadata (tags)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            latest=false
+            suffix=-models
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+
+      # Build for both arches by layering the model COPY on the multi-arch base
+      # image the merge job just pushed (pulled per-platform by buildx).
+      - name: Build and push model-bundled image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.models
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            BASE=${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ env.BASE_VERSION }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          push: true

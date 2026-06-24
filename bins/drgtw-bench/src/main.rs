@@ -236,6 +236,7 @@ fn build_config(mock_base_url: &str, pii_enabled: bool) -> Arc<Config> {
         model_aliases: Default::default(),
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     })
 }
 

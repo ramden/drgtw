@@ -45,9 +45,11 @@ fn engine_disabled_recognizers_suppressed() {
         enabled_by_default: true,
         disabled_recognizers: vec!["email".to_string(), "iban".to_string()],
         custom_recognizers: vec![],
+        entities: None,
         ner: None,
         vault: None,
         embeddings_require_vault: false,
+        require_ner: false,
     };
     let engine = PiiEngine::from_config(&cfg).unwrap();
     let text = "alice@example.com DE89370400440532013000";
@@ -72,9 +74,11 @@ fn engine_custom_recognizer_fires() {
             name: "order".to_string(),
             pattern: r"ORD-\d{6}".to_string(),
         }],
+        entities: None,
         ner: None,
         vault: None,
         embeddings_require_vault: false,
+        require_ner: false,
     };
     let engine = PiiEngine::from_config(&cfg).unwrap();
     let text = "Your order ORD-123456 is shipped.";
@@ -93,9 +97,11 @@ fn engine_invalid_custom_regex_is_engine_error() {
             name: "broken".to_string(),
             pattern: r"(?P<".to_string(), // definitely invalid
         }],
+        entities: None,
         ner: None,
         vault: None,
         embeddings_require_vault: false,
+        require_ner: false,
     };
     let result = PiiEngine::from_config(&cfg);
     assert!(matches!(result, Err(EngineError::InvalidRegex { .. })));

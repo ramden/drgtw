@@ -101,6 +101,7 @@ fn openai_config(
         model_aliases: Default::default(),
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     })
 }
 

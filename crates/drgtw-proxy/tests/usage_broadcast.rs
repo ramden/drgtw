@@ -70,6 +70,7 @@ fn make_config(upstream_base: &str, events: Option<EventsConfig>) -> Arc<Config>
         model_aliases: Default::default(),
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     })
 }
 

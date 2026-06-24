@@ -67,6 +67,7 @@ fn tiny_max_body_config(mock_base_url: &str) -> Arc<Config> {
         model_aliases: Default::default(),
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     })
 }
 
@@ -114,6 +115,7 @@ fn test_config(mock_base_url: &str) -> Arc<Config> {
         model_aliases: Default::default(),
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     })
 }
 
@@ -303,6 +305,7 @@ async fn test_unknown_model_returns_404() {
         model_aliases: Default::default(),
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     });
     let app = test_router(config);
 
@@ -530,6 +533,7 @@ async fn test_upstream_connect_error_returns_502() {
         model_aliases: Default::default(),
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     });
 
     let app = test_router(config);
@@ -658,6 +662,7 @@ async fn test_body_within_limit_openai_proceeds() {
         model_aliases: Default::default(),
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     });
 
     let app = test_router(big_limit_config);

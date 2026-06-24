@@ -1,0 +1,24 @@
+# syntax=docker/dockerfile:1
+# ---------------------------------------------------------------------------
+# DRGTW — model-bundled image variant  (tag: <version>-models)
+#
+# Layers the multilingual NER model on top of the slim runtime image so
+# PERSON / ORGANIZATION / LOCATION masking works out of the box — no volume
+# mount required. Pull `<user>/drgtw:<version>-models` and point config at
+# `model_dir = "/app/models/ner-multilingual"`.
+#
+# The model artifacts (model_quantized.onnx, tokenizer.json, config.json) are
+# NOT in the repo (gitignored — too large, and licensing is separable). The
+# release workflow stages them into `models-dist/ner-multilingual` by
+# downloading $NER_MODEL_URL before this build. See .github/workflows/release.yml.
+#
+# BASE defaults to the slim image for the same release; the workflow passes the
+# fully-qualified `<user>/drgtw:<version>` it just pushed.
+# ---------------------------------------------------------------------------
+ARG BASE=drgtw:latest
+FROM ${BASE}
+
+# Bake the NER model in, owned by the non-root service user the base declares.
+COPY --chown=drgtw:drgtw models-dist/ner-multilingual /app/models/ner-multilingual
+
+# Entrypoint / CMD / user / port are all inherited from the base image.

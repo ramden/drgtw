@@ -129,6 +129,7 @@ fn base_config(mcp_servers: HashMap<String, McpServerConfig>) -> Arc<Config> {
         model_aliases: Default::default(),
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     })
 }
 

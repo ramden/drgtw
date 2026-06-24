@@ -85,6 +85,16 @@ pub enum ProxyError {
     #[error("PII processing unavailable: {0}")]
     PiiUnavailableAnthropic(String),
 
+    // --- guardrails (v0.0.8) ---
+    /// A content guardrail blocked the request or response. The `reason`
+    /// (operator rule name) is logged server-side; the client sees generic text.
+    #[error("blocked by content guardrail")]
+    GuardrailBlocked {
+        reason: String,
+        /// Which wire format to use for the error response body.
+        fmt: ErrorFormat,
+    },
+
     // --- upstream ---
     #[error("upstream error: {0}")]
     Upstream(#[from] reqwest::Error),
@@ -106,6 +116,7 @@ impl ProxyError {
             ProxyError::PiiUnavailable(_) | ProxyError::PiiUnavailableAnthropic(_) => {
                 StatusCode::SERVICE_UNAVAILABLE
             }
+            ProxyError::GuardrailBlocked { .. } => StatusCode::FORBIDDEN,
             ProxyError::Upstream(_) => StatusCode::BAD_GATEWAY,
         }
     }
@@ -126,6 +137,7 @@ impl ProxyError {
                 "rate_limit_error"
             }
             ProxyError::PiiUnavailable(_) | ProxyError::PiiUnavailableAnthropic(_) => "api_error",
+            ProxyError::GuardrailBlocked { .. } => "invalid_request_error",
             ProxyError::Upstream(_) => "upstream_error",
         }
     }
@@ -144,6 +156,7 @@ impl ProxyError {
             ProxyError::PiiUnavailable(_) | ProxyError::PiiUnavailableAnthropic(_) => {
                 "pii_unavailable"
             }
+            ProxyError::GuardrailBlocked { .. } => "content_filter",
             ProxyError::Upstream(_) => "upstream_error",
         }
     }
@@ -163,6 +176,7 @@ impl ProxyError {
                 "rate_limit_error"
             }
             ProxyError::PiiUnavailable(_) | ProxyError::PiiUnavailableAnthropic(_) => "api_error",
+            ProxyError::GuardrailBlocked { .. } => "invalid_request_error",
             ProxyError::Upstream(_) => "api_error",
         }
     }
@@ -174,12 +188,15 @@ impl ProxyError {
     /// For `InvalidPiiHeader` the embedded `fmt` field overrides the caller's
     /// `fmt` argument — the error knows which endpoint it came from.
     pub fn into_response_fmt(self, fmt: ErrorFormat) -> Response {
-        let effective_fmt = if let ProxyError::InvalidPiiHeader { fmt: inner_fmt } = self {
-            return ProxyError::InvalidPiiHeader { fmt: inner_fmt }.into_response_with(inner_fmt);
-        } else {
-            fmt
-        };
-        self.into_response_with(effective_fmt)
+        // Errors that embed their own wire format override the caller's `fmt`.
+        match &self {
+            ProxyError::InvalidPiiHeader { fmt: inner } | ProxyError::GuardrailBlocked { fmt: inner, .. } => {
+                let inner = *inner;
+                return self.into_response_with(inner);
+            }
+            _ => {}
+        }
+        self.into_response_with(fmt)
     }
 
     fn into_response_with(self, fmt: ErrorFormat) -> Response {
@@ -202,6 +219,10 @@ impl ProxyError {
             ProxyError::PiiUnavailable(detail) | ProxyError::PiiUnavailableAnthropic(detail) => {
                 tracing::warn!(detail = %detail, "PII processing unavailable");
                 "PII processing unavailable; request not forwarded".to_owned()
+            }
+            ProxyError::GuardrailBlocked { reason, .. } => {
+                tracing::warn!(reason = %reason, "request/response blocked by content guardrail");
+                "blocked by content policy".to_owned()
             }
             other => other.to_string(),
         }
@@ -278,6 +299,9 @@ impl IntoResponse for ProxyError {
         match self {
             ProxyError::InvalidPiiHeader { fmt } => {
                 ProxyError::InvalidPiiHeader { fmt }.into_response_with(fmt)
+            }
+            ProxyError::GuardrailBlocked { reason, fmt } => {
+                ProxyError::GuardrailBlocked { reason, fmt }.into_response_with(fmt)
             }
             other => other.into_openai_response(),
         }

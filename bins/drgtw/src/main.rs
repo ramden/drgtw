@@ -6,7 +6,7 @@ use std::process;
 
 use clap::{Parser, Subcommand};
 use drgtw::server;
-use drgtw_config::load;
+use drgtw_config::load_strict;
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
 use tracing_subscriber::{EnvFilter, fmt};
@@ -25,6 +25,14 @@ struct Cli {
     /// Validate config and exit without starting the server.
     #[arg(long)]
     validate_config: bool,
+
+    /// Reject unknown configuration keys instead of warning. A misplaced or
+    /// misspelled key (e.g. `[ner]` instead of `[pii.ner]`, or a `[pii]`-level
+    /// `score_threshold` that belongs under `[pii.ner]`) is otherwise silently
+    /// ignored — dangerous for PII settings, where a dropped key leaks data.
+    /// With this flag any unknown key is a hard error and boot fails.
+    #[arg(long)]
+    strict_config: bool,
 }
 
 #[derive(Subcommand)]
@@ -80,7 +88,7 @@ async fn main() {
     // Config is loaded BEFORE the tracing subscriber so the OTel layer can be
     // attached to the same `registry()` when `[otel] enabled`. Load failures
     // are reported via `eprintln!` (no subscriber needed yet).
-    let config = match load(&config_path) {
+    let config = match load_strict(&config_path, cli.strict_config) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("error: {e}");
@@ -137,6 +145,19 @@ async fn main() {
     match otel_guard.as_ref().and_then(|g| g.tracer_provider()) {
         Some(tp) => registry.with(drgtw_otel::tracer_layer(tp)).init(),
         None => registry.init(),
+    }
+
+    // GDPR guard-rail: warn loudly when the PII pipeline is on by default but no
+    // NER model is configured — person/organization/location names then reach
+    // the upstream provider in clear text (only structured identifiers are
+    // masked). Set `pii.require_ner = true` to make this a hard boot failure.
+    if config.pii.names_leak_without_ner() {
+        tracing::warn!(
+            "pii.enabled_by_default = true but no [pii.ner] model is configured: \
+             PERSON / ORGANIZATION / LOCATION names are NOT masked and will reach the \
+             upstream provider in clear text. Configure [pii.ner].model_dir to mask them, \
+             or set pii.require_ner = true to refuse to start without it."
+        );
     }
 
     // Canonicalise the config path so the UI editor always has an absolute path.

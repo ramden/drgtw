@@ -110,6 +110,18 @@ pub(crate) fn build_live(
 
     let pii = Arc::new(build_engine_with_ner(&config.pii, base_dir)?);
 
+    // Content guardrails (v0.0.8). Built only when at least one rule is
+    // configured; shares the PII engine for `contact_info` guardrails. An
+    // invalid guardrail regex fails boot/reload (fail-closed), surfaced through
+    // the shared `EngineBuildError::Guardrail` variant.
+    let guardrails = if config.guardrails.is_empty() {
+        None
+    } else {
+        let engine = drgtw_guardrails::GuardrailEngine::from_config(&config.guardrails, Arc::clone(&pii))
+            .map_err(|e| drgtw_pii::EngineBuildError::Guardrail(e.to_string()))?;
+        Some(Arc::new(engine))
+    };
+
     // Build the shared reqwest client for MCP upstreams. At reload we build a
     // fresh client — the old one is dropped when the old Live is dropped.
     let mcp_client = reqwest::Client::builder()
@@ -145,7 +157,7 @@ pub(crate) fn build_live(
         })
         .collect();
 
-    Ok(Live { config, keys, limiter, budget, pii, mcp, cost_tables })
+    Ok(Live { config, keys, limiter, budget, pii, guardrails, mcp, cost_tables })
 }
 
 /// Translate a configured MCP server into an [`UpstreamServer`].

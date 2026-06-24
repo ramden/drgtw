@@ -123,6 +123,7 @@ fn base_config(connection: Connection, virtual_key: &str, sink: &MockServer, pii
         model_aliases: Default::default(),
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     }
 }
 

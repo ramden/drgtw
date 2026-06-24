@@ -109,11 +109,190 @@ For per-agent / per-session cost attribution, each event may carry a `metadata` 
 
 ## `[pii]`
 
-Optional. PII pseudonymization settings. The engine is a Phase 3 deliverable; this section is parsed and validated now but has no runtime effect until Phase 3.
+Optional. PII pseudonymization. **Fully live** — the engine runs in the request path: detected PII is replaced with stable pseudonyms before the prompt is forwarded upstream, and the original values are restored in the response. See the [PII deployment guide](pii.md) for an operator-focused walkthrough.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `enabled_by_default` | bool | no | `false` | When `true`, PII pseudonymization is applied to every request unless the caller opts out via `x-drgtw-pii: off`. When `false`, it is applied only when the caller sends `x-drgtw-pii: on`. |
+| `enabled_by_default` | bool | no | `true` | When `true`, pseudonymization runs on every request unless the caller opts out via `x-drgtw-pii: off`. When `false`, it runs only when the caller sends `x-drgtw-pii: on`. |
+| `disabled_recognizers` | array of strings | no | `[]` | Built-in recognizer names to turn off (e.g. `["DATE_TIME"]`). |
+| `custom_recognizers` | array of tables | no | `[]` | Extra pattern-based recognizers. See [`[[pii.custom_recognizers]]`](#pii-custom_recognizers). |
+| `entities` | array of strings | no | *(absent → keep all)* | Optional allow-list of entity **kinds** to keep. See [Entity allow-list](#entity-allow-list). |
+| `require_ner` | bool | no | `false` | When `true` and **no** `[pii.ner]` block is configured, the gateway **refuses to boot** (fail-closed for GDPR). See [NER boot behaviour](#ner-and-missing-model-boot-behaviour). |
+| `embeddings_require_vault` | bool | no | `false` | When `true`, embeddings requests require a configured `[pii.vault]` (so pseudonyms are reversible) or the request is rejected. |
+
+### Entity allow-list
+
+`entities` is an optional list of the entity **kinds** that pseudonymization should keep. Names are **Presidio-style, case-insensitive**, and accept short aliases. When `entities` is **absent**, all kinds are kept. An **empty list is rejected** at validation (an empty allow-list would silently disable all masking — express that as `enabled_by_default = false` instead). Filtering is **post-scan**: every recognizer still runs; detections whose kind is not in the list are simply dropped before pseudonymization.
+
+| Canonical name | Aliases | Detected by default? |
+|----------------|---------|----------------------|
+| `PERSON` | — | NER only |
+| `LOCATION` | `LOC` | NER only |
+| `ORGANIZATION` | `ORG` | NER only |
+| `EMAIL_ADDRESS` | `EMAIL` | yes (regex) |
+| `PHONE_NUMBER` | `PHONE` | yes (regex) |
+| `CREDIT_CARD` | `CC`, `CARD` | yes (regex) |
+| `IBAN_CODE` | `IBAN` | yes (regex) |
+| `IP_ADDRESS` | `IP` | yes (regex, IPv4 + IPv6) |
+| `DATE_TIME` | `DATE`, `DATETIME` | yes (regex, see note) |
+| `NATIONAL_ID` | — | **no built-in detector** |
+| `NRP` | — | **no built-in detector** |
+
+A `custom_recognizers` recognizer `name` is also a valid entry in `entities`.
+
+- **`IP_ADDRESS`** matches IPv4 and IPv6 literals.
+- **`DATE_TIME`** matches German `DD.MM.YYYY` and ISO `YYYY-MM-DD`. It is **best-effort / high recall**: it validates only `month ≤ 12` and `day ≤ 31`, so it will over-match (e.g. version-like `12.10.2024`). If false positives are unacceptable, drop `DATE_TIME` from `entities` (or add it to `disabled_recognizers`).
+- **`PERSON` / `ORGANIZATION` / `LOCATION`** require a NER model (`[pii.ner]`). Without one they are **never masked** — see the boot warning below.
+- **`NATIONAL_ID` / `NRP`** have **no built-in detector** in this release. They are reachable only via `custom_recognizers` (a pattern) or a future NER model; listing them in `entities` alone masks nothing.
+
+### `[pii.ner]`
+
+Optional. Named-entity recognition for `PERSON` / `ORGANIZATION` / `LOCATION` (and any other label the model emits). Runs an ONNX multilingual model in a bounded worker pool.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `model_dir` | string | yes | — | Directory holding the model artifacts (`model_quantized.onnx`, `tokenizer.json`, `config.json`). Supports `${ENV_VAR}`. |
+| `score_threshold` | float | no | `0.5` | Minimum confidence (`0.0..=1.0`) for an entity to be kept. |
+| `fail_mode` | enum string | no | `"open"` | Behaviour on a **runtime** NER error. `"open"` logs a warning and returns no NER detections (request proceeds, names may pass through). `"closed"` propagates the error to the caller (request fails). |
+| `timeout_ms` | int | no | `5000` | Per-inference deadline in milliseconds. Must be `> 0`. |
+| `workers` | int | no | `2` | NER worker threads. Must be `> 0`. |
+| `queue_capacity` | int | no | `64` | Max queued inference jobs before backpressure. Must be `> 0`. |
+
+#### Model packaging
+
+The NER model is **not** in the repo and **not** in the base/slim image (it is gitignored and dockerignored). Get it onto a box in one of two ways:
+
+1. **Mount a volume** with the slim image and point `model_dir` at the mount:
+   ```
+   docker run -v /host/ner-multilingual:/app/models/ner-multilingual ... <user>/drgtw:<version>
+   ```
+   then set `model_dir = "/app/models/ner-multilingual"`.
+2. **Use the model-bundled image tag** `<user>/drgtw:<version>-models` (v0.0.8+), which bakes the model into `/app/models/ner-multilingual`. Zero extra setup — just set `model_dir = "/app/models/ner-multilingual"`.
+
+The Dockerfiles declare `VOLUME ["/app/models", "/app/data"]`.
+
+#### NER and missing-model boot behaviour
+
+- A `[pii.ner]` block whose `model_dir` is **missing or invalid** is a **hard boot failure** (fail-closed) — the gateway will not start with a half-configured masker.
+- `require_ner = true` with **no** `[pii.ner]` block is also a hard boot failure.
+- `enabled_by_default = true` with **no** `[pii.ner]` block and `require_ner = false` boots, but logs a **warning**: *"PERSON/ORGANIZATION/LOCATION names are NOT masked"*. Regex entities (email, phone, IBAN, credit card, IP, date) still mask.
+- `fail_mode` (`open` | `closed`) covers **runtime** NER errors only — inference timeout, full queue, model failure. It does **not** cover the missing-model case above, which always fails at boot regardless of `fail_mode`.
+
+### `[[pii.custom_recognizers]]`
+
+Optional, repeatable. Each block adds a pattern-based recognizer. The recognizer's `name` becomes a valid entity kind for `entities` and for `disabled_recognizers`. Use these for site-specific identifiers (employee numbers, ticket ids) and for `NATIONAL_ID` / `NRP`, which have no built-in detector.
+
+### `[pii.vault]`
+
+Optional. Persistent, reversible pseudonym store. When configured, pseudonym↔original mappings are encrypted at rest, so restoration survives restarts and the same value always maps to the same pseudonym.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `path` | string | yes | — | SQLite file path (mount `/app/data` in containers). Non-empty. |
+| `key` | string | yes | — | Encryption key: **64 hex characters** (32 bytes). Supports `${ENV_VAR}` — keep the literal key out of the file. |
+
+### Worked example (GDPR / EMEA)
+
+```toml
+[pii]
+enabled_by_default = true          # mask every request unless caller opts out
+require_ner        = true          # refuse to boot if NER is misconfigured
+entities           = [             # keep only these kinds (case-insensitive, aliases ok)
+  "PERSON", "ORG", "LOCATION",
+  "EMAIL", "PHONE", "IBAN", "CREDIT_CARD",
+]
+
+[pii.ner]
+model_dir       = "/app/models/ner-multilingual"
+score_threshold = 0.5
+fail_mode       = "closed"         # a runtime NER error fails the request, never leaks
+timeout_ms      = 5000
+workers         = 2
+
+[pii.vault]
+path = "/app/data/pii-vault.db"
+key  = "${DRGTW_PII_VAULT_KEY}"    # 64 hex chars, supplied via env
+```
+
+---
+
+## `[[guardrails.rules]]`
+
+Optional, repeatable. Content-filter rules applied to prompts (pre-call) and/or responses (post-call). Each `[[guardrails.rules]]` block is one rule.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | string | yes | — | Unique label for the rule (used in logs/traces). Must be non-empty and unique. |
+| `kind` | enum string | yes | — | `"prompt_injection"`, `"banned_content"`, or `"contact_info"`. See below. |
+| `phase` | enum string | no | `"pre"` | When the rule runs: `"pre"` (request), `"post"` (response), or `"both"`. |
+| `action` | enum string | no | `"block"` | What to do on a match: `"block"`, `"redact"`, or `"flag"`. See below. |
+| `patterns` | array of strings | no | `[]` | Regex strings. For `prompt_injection` these are **extra** heuristics on top of the built-ins; for `banned_content` they are the blocklist. Ignored by `contact_info`. |
+| `entities` | array of strings | no | `[]` | Entity names (same vocabulary as `[pii].entities`). Used by `contact_info` only. |
+
+### Kinds
+
+| `kind` | Matches | Uses |
+|--------|---------|------|
+| `prompt_injection` | Jailbreak / prompt-injection attempts. Has **built-in** heuristics; `patterns` add more. | `patterns` |
+| `banned_content` | Disallowed content by regex blocklist. | `patterns` |
+| `contact_info` | Contact PII (email, phone, …) by entity kind. | `entities` |
+
+`prompt_injection` pre-call rules run on the **raw prompt before pseudonymization**, so they see the original text.
+
+### Actions
+
+| `action` | Behaviour (v0.0.8) |
+|----------|--------------------|
+| `block` | **Enforced.** Returns HTTP `403` — OpenAI body with `content_filter` code, Anthropic `invalid_request_error`. No upstream call. |
+| `flag` | **Enforced.** Logs/traces the match and continues. |
+| `redact` | **Detect-and-log only.** The match is detected and logged but the body is **not yet mutated** — body-redaction enforcement is a fast-follow. Do not rely on `redact` to strip content in this release. |
+
+### Limitations (v0.0.8)
+
+- **`redact` does not yet mutate the body** — it only detects and logs (see table above). Use `block` for hard enforcement.
+- **Post-call guardrails run on non-streaming responses only.** Streaming responses are **not** scanned. If you need response scanning, disable streaming for those routes or rely on pre-call rules.
+
+### Worked example
+
+```toml
+[[guardrails.rules]]
+name   = "jailbreak"
+kind   = "prompt_injection"
+phase  = "pre"
+action = "block"                   # 403 before any upstream call
+patterns = ['(?i)ignore (all )?previous instructions']
+
+[[guardrails.rules]]
+name   = "no-secrets"
+kind   = "banned_content"
+phase  = "both"
+action = "block"
+patterns = ['(?i)AKIA[0-9A-Z]{16}']   # leaked AWS access key ids
+
+[[guardrails.rules]]
+name   = "outbound-contact-info"
+kind   = "contact_info"
+phase  = "post"                    # non-streaming responses only
+action = "flag"                    # log; redact does not yet mutate the body
+entities = ["EMAIL", "PHONE"]
+```
+
+---
+
+## Strict config (`--strict-config`)
+
+By default, unknown or misplaced TOML keys are **logged as a warning and ignored** so an old config keeps booting against a newer binary. Passing `--strict-config` on the CLI turns any unknown key into a **hard error** — boot fails.
+
+Use it in production, especially for PII. A silently-ignored key can disable protection without any visible failure:
+
+- A misplaced `[ner]` table instead of `[pii.ner]` — the NER block never binds, so `PERSON`/`ORG`/`LOCATION` are never masked.
+- `score_threshold` set at `[pii]` level instead of under `[pii.ner]` — silently dropped, NER runs with the default threshold.
+
+Without `--strict-config` these only produce a warning in the log (key paths are reported dotted, e.g. `pii.ner.workers`); with it, the gateway refuses to start until the key is in the right place.
+
+```
+drgtw --config drgtw.toml --strict-config
+```
 
 ---
 
@@ -458,7 +637,17 @@ smart = "gpt-4o"
 url = "https://ingest.example.com/llm-usage"
 
 [pii]
-enabled_by_default = false
+enabled_by_default = true
+entities = ["PERSON", "ORG", "LOCATION", "EMAIL", "PHONE", "IBAN", "CREDIT_CARD"]
+
+[pii.ner]
+model_dir = "/app/models/ner-multilingual"
+fail_mode = "closed"
+
+[[guardrails.rules]]
+name = "jailbreak"
+kind = "prompt_injection"
+action = "block"
 
 [tracing]
 enabled = true

@@ -380,6 +380,158 @@ impl Recognizer for CustomRegexRecognizer {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// IpAddressRecognizer (v0.0.8)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// IPv4: four dotted octets, each 0–255 (range enforced in the pattern, so no
+/// post-validation is needed). Word-boundary anchored.
+static IPV4_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?x)
+        \b
+        (?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}
+        (?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)
+        \b",
+    )
+    .expect("IPV4_RE is a valid regex")
+});
+
+/// IPv6 candidate: any run containing ≥2 colons and only hex/colon/dot chars.
+/// Correctness is decided by parsing with [`std::net::Ipv6Addr`] in `detect`,
+/// so the candidate pattern can be permissive.
+static IPV6_CANDIDATE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"[0-9A-Fa-f]{0,4}(?::[0-9A-Fa-f.]{0,4}){2,7}").expect("IPV6_CANDIDATE_RE is valid")
+});
+
+pub struct IpAddressRecognizer;
+
+impl IpAddressRecognizer {
+    pub fn new() -> Self {
+        LazyLock::force(&IPV4_RE);
+        LazyLock::force(&IPV6_CANDIDATE_RE);
+        Self
+    }
+}
+
+impl Default for IpAddressRecognizer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Recognizer for IpAddressRecognizer {
+    fn name(&self) -> &str {
+        "ip_address"
+    }
+
+    fn detect(&self, text: &str) -> Vec<Detection> {
+        let bytes = text.as_bytes();
+        let mut out: Vec<Detection> = IPV4_RE
+            .find_iter(text)
+            .map(|m| Detection {
+                start: m.start(),
+                end: m.end(),
+                kind: EntityKind::IpAddress,
+            })
+            .collect();
+
+        for m in IPV6_CANDIDATE_RE.find_iter(text) {
+            // Reject candidates glued to surrounding word chars (e.g. inside a
+            // longer token) and validate by parsing.
+            // Reject when glued to a surrounding word char or colon — e.g. the
+            // valid loopback `::1` embedded in the garbage token `zzzz::1`.
+            let before_ok = m.start() == 0 || {
+                let b = bytes[m.start() - 1];
+                !(b.is_ascii_alphanumeric() || b == b':')
+            };
+            let after_ok = m.end() == text.len() || {
+                let b = bytes[m.end()];
+                !(b.is_ascii_alphanumeric() || b == b':')
+            };
+            if before_ok && after_ok && m.as_str().parse::<std::net::Ipv6Addr>().is_ok() {
+                out.push(Detection {
+                    start: m.start(),
+                    end: m.end(),
+                    kind: EntityKind::IpAddress,
+                });
+            }
+        }
+        out
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DateTimeRecognizer (v0.0.8)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Dates in common European + ISO forms: `DD.MM.YYYY` / `D.M.YYYY` (German) and
+/// `YYYY-MM-DD` (ISO 8601). NOTE: best-effort — validates month ≤ 12 and day ≤
+/// 31 only (no calendar/leap-year check). Documented as high-recall, so a
+/// deployment that cannot tolerate date false-positives should drop `DATE_TIME`
+/// from `pii.entities`.
+static DATE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?x)
+        \b(\d{1,2})\.(\d{1,2})\.(\d{4})\b   # DD.MM.YYYY
+        |
+        \b(\d{4})-(\d{1,2})-(\d{1,2})\b     # YYYY-MM-DD
+        ",
+    )
+    .expect("DATE_RE is a valid regex")
+});
+
+pub struct DateTimeRecognizer;
+
+impl DateTimeRecognizer {
+    pub fn new() -> Self {
+        LazyLock::force(&DATE_RE);
+        Self
+    }
+
+    /// `true` if `(day, month)` are in plausible ranges (1..=31, 1..=12).
+    fn plausible(day: u32, month: u32) -> bool {
+        (1..=31).contains(&day) && (1..=12).contains(&month)
+    }
+}
+
+impl Default for DateTimeRecognizer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Recognizer for DateTimeRecognizer {
+    fn name(&self) -> &str {
+        "datetime"
+    }
+
+    fn detect(&self, text: &str) -> Vec<Detection> {
+        DATE_RE
+            .captures_iter(text)
+            .filter_map(|c| {
+                let m = c.get(0)?;
+                // Either the DD.MM.YYYY group (1,2) or the YYYY-MM-DD group (5,6).
+                let (day, month) = if let (Some(d), Some(mo)) = (c.get(1), c.get(2)) {
+                    (d.as_str().parse().ok()?, mo.as_str().parse().ok()?)
+                } else if let (Some(mo), Some(d)) = (c.get(5), c.get(6)) {
+                    (d.as_str().parse().ok()?, mo.as_str().parse().ok()?)
+                } else {
+                    return None;
+                };
+                if !Self::plausible(day, month) {
+                    return None;
+                }
+                Some(Detection {
+                    start: m.start(),
+                    end: m.end(),
+                    kind: EntityKind::DateTime,
+                })
+            })
+            .collect()
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -659,5 +811,107 @@ mod tests {
     fn custom_name_returned() {
         let r = CustomRegexRecognizer::new("myrecog", r"\d+").unwrap();
         assert_eq!(r.name(), "myrecog");
+    }
+
+    // ── IP address ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn ipv4_detects_valid() {
+        let r = IpAddressRecognizer::new();
+        for case in ["192.168.1.1", "10.0.0.0", "255.255.255.255", "8.8.8.8"] {
+            let dets = r.detect(case);
+            assert_eq!(dets.len(), 1, "expected 1 for {case:?}");
+            assert_eq!(&case[dets[0].start..dets[0].end], case);
+            assert_eq!(dets[0].kind, EntityKind::IpAddress);
+        }
+    }
+
+    #[test]
+    fn ipv4_rejects_invalid_octets() {
+        let r = IpAddressRecognizer::new();
+        // 256 out of range — the strict pattern won't match the full quad.
+        assert!(r.detect("256.1.1.1").iter().all(|d| {
+            // any match must not be the bogus full string
+            &"256.1.1.1"[d.start..d.end] != "256.1.1.1"
+        }));
+        assert!(r.detect("999.999.999.999").is_empty());
+    }
+
+    #[test]
+    fn ipv4_in_sentence() {
+        let r = IpAddressRecognizer::new();
+        let text = "Connect to 192.168.1.100 now";
+        let dets = r.detect(text);
+        assert_eq!(dets.len(), 1);
+        assert_eq!(&text[dets[0].start..dets[0].end], "192.168.1.100");
+    }
+
+    #[test]
+    fn ipv6_detects_full_and_compressed() {
+        let r = IpAddressRecognizer::new();
+        for case in [
+            "2001:0db8:85a3:0000:0000:8a2e:0370:7334",
+            "2001:db8::8a2e:370:7334",
+            "::1",
+        ] {
+            let dets = r.detect(case);
+            assert!(!dets.is_empty(), "expected IPv6 detection for {case:?}");
+            assert!(dets.iter().any(|d| d.kind == EntityKind::IpAddress));
+        }
+    }
+
+    #[test]
+    fn ipv6_rejects_garbage() {
+        let r = IpAddressRecognizer::new();
+        assert!(r.detect("zzzz::1").is_empty());
+        // A plain clock time has colons but is not a valid IPv6.
+        assert!(r.detect("12:30:45").is_empty());
+    }
+
+    #[test]
+    fn ip_multibyte_before() {
+        let r = IpAddressRecognizer::new();
+        let text = "IP: 🏦 10.0.0.1 here";
+        let dets = r.detect(text);
+        assert!(dets.iter().any(|d| &text[d.start..d.end] == "10.0.0.1"));
+    }
+
+    // ── Date ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn date_detects_german_and_iso() {
+        let r = DateTimeRecognizer::new();
+        for case in ["31.12.2024", "01.01.2000", "2024-12-31", "5.3.2024"] {
+            let dets = r.detect(case);
+            assert_eq!(dets.len(), 1, "expected 1 for {case:?}");
+            assert_eq!(&case[dets[0].start..dets[0].end], case);
+            assert_eq!(dets[0].kind, EntityKind::DateTime);
+        }
+    }
+
+    #[test]
+    fn date_rejects_implausible() {
+        let r = DateTimeRecognizer::new();
+        assert!(r.detect("32.01.2024").is_empty(), "day 32");
+        assert!(r.detect("13.13.2024").is_empty(), "month 13");
+        assert!(r.detect("2024-13-45").is_empty(), "iso month 13");
+    }
+
+    #[test]
+    fn date_in_sentence() {
+        let r = DateTimeRecognizer::new();
+        let text = "Meeting on 15.05.2024 at 10am";
+        let dets = r.detect(text);
+        assert_eq!(dets.len(), 1);
+        assert_eq!(&text[dets[0].start..dets[0].end], "15.05.2024");
+    }
+
+    #[test]
+    fn date_multibyte_before() {
+        let r = DateTimeRecognizer::new();
+        let text = "Datum: 📅 01.06.2024";
+        let dets = r.detect(text);
+        assert_eq!(dets.len(), 1);
+        assert_eq!(&text[dets[0].start..dets[0].end], "01.06.2024");
     }
 }

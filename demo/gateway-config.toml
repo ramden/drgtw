@@ -27,11 +27,23 @@ connections = ["openai"]
 models = ["gpt-4o-mini"]
 
 # ---------------------------------------------------------------------------
-# PII pseudonymization. enabled_by_default is already true in current builds
-# (privacy-first); set explicitly here so the demo is self-documenting.
+# PII pseudonymization (LIVE). enabled_by_default is already true in current
+# builds (privacy-first); set explicitly here so the demo is self-documenting.
+# Email / phone / IBAN / credit-card / IP / date mask via regex with no model.
 # ---------------------------------------------------------------------------
 [pii]
 enabled_by_default = true
+
+# PERSON / ORGANIZATION / LOCATION need the NER model. To enable name masking,
+# point model_dir at the model directory and uncomment the block below.
+#   * slim image: mount it with  -v /host/ner-multilingual:/app/models/ner-multilingual
+#   * or run the model-bundled image tag  <user>/drgtw:<version>-models  which
+#     bakes the model into /app/models/ner-multilingual (no volume needed).
+# Without [pii.ner], names are NOT masked and the gateway logs a boot warning.
+#
+# [pii.ner]
+# model_dir = "/app/models/ner-multilingual"
+# fail_mode = "closed"
 
 # ---------------------------------------------------------------------------
 # Filesystem request tracing. On by default (JSONL in traces/, auto-rotated

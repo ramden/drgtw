@@ -32,7 +32,8 @@ pub mod stream;
 pub mod vault_store;
 
 pub use body::{
-    BodyFormat, pseudonymize_body, restore_body, restore_body_with_store, try_pseudonymize_body,
+    BodyFormat, collect_request_text, collect_response_text, pseudonymize_body, restore_body,
+    restore_body_with_store, try_pseudonymize_body,
 };
 pub use engine::{EngineBuildError, EngineError, PiiEngine, build_engine_with_ner};
 pub use entity_map::EntityMap;
@@ -49,7 +50,10 @@ pub struct Detection {
     pub kind: EntityKind,
 }
 
-/// Entity categories. Person/Org/Location reserved for Phase 4 (NER).
+/// Entity categories. Person/Org/Location come from NER (Phase 4);
+/// IpAddress/DateTime are built-in regex recognizers (v0.0.8); NationalId/Nrp
+/// have no built-in detector and are reachable only via `custom_recognizers`
+/// or a future NER model.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum EntityKind {
     Email,
@@ -59,13 +63,18 @@ pub enum EntityKind {
     Person,
     Org,
     Location,
+    IpAddress,
+    DateTime,
+    NationalId,
+    Nrp,
     /// From config `pii.custom_recognizers`; value = recognizer name.
     Custom(Arc<str>),
 }
 
 impl EntityKind {
     /// Placeholder prefix: `EMAIL`, `PHONE`, `IBAN`, `CARD`, `PERSON`, `ORG`,
-    /// `LOCATION`; custom kinds use their uppercased name.
+    /// `LOCATION`, `IP`, `DATE`, `NID`, `NRP`; custom kinds use their uppercased
+    /// name.
     pub fn placeholder_prefix(&self) -> String {
         match self {
             EntityKind::Email => "EMAIL".into(),
@@ -75,7 +84,33 @@ impl EntityKind {
             EntityKind::Person => "PERSON".into(),
             EntityKind::Org => "ORG".into(),
             EntityKind::Location => "LOCATION".into(),
+            EntityKind::IpAddress => "IP".into(),
+            EntityKind::DateTime => "DATE".into(),
+            EntityKind::NationalId => "NID".into(),
+            EntityKind::Nrp => "NRP".into(),
             EntityKind::Custom(name) => name.to_uppercase(),
+        }
+    }
+
+    /// Map a canonical config entity name (presidio-style, e.g. produced by
+    /// [`drgtw_config::canonical_pii_entity_name`]) to its built-in
+    /// [`EntityKind`]. Returns `None` for `NATIONAL_ID`/`NRP` (no built-in
+    /// kind backs a bare name — those arrive via custom recognizers) and for
+    /// unknown names.
+    pub fn from_canonical_name(canon: &str) -> Option<EntityKind> {
+        match canon {
+            "EMAIL_ADDRESS" => Some(EntityKind::Email),
+            "PHONE_NUMBER" => Some(EntityKind::Phone),
+            "IBAN_CODE" => Some(EntityKind::Iban),
+            "CREDIT_CARD" => Some(EntityKind::CreditCard),
+            "PERSON" => Some(EntityKind::Person),
+            "ORGANIZATION" => Some(EntityKind::Org),
+            "LOCATION" => Some(EntityKind::Location),
+            "IP_ADDRESS" => Some(EntityKind::IpAddress),
+            "DATE_TIME" => Some(EntityKind::DateTime),
+            "NATIONAL_ID" => Some(EntityKind::NationalId),
+            "NRP" => Some(EntityKind::Nrp),
+            _ => None,
         }
     }
 }

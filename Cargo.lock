@@ -925,7 +925,7 @@ checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 
 [[package]]
 name = "drgtw"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "axum",
  "bytes",
@@ -951,7 +951,7 @@ dependencies = [
 
 [[package]]
 name = "drgtw-bench"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "axum",
  "clap",
@@ -969,19 +969,21 @@ dependencies = [
 
 [[package]]
 name = "drgtw-config"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "serde",
+ "serde_ignored",
  "tempfile",
  "thiserror",
  "toml",
  "toml_edit",
+ "tracing",
  "url",
 ]
 
 [[package]]
 name = "drgtw-events"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "hex",
  "hmac 0.12.1",
@@ -996,8 +998,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "drgtw-guardrails"
+version = "0.0.8"
+dependencies = [
+ "drgtw-config",
+ "drgtw-pii",
+ "regex",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "drgtw-history"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "drgtw-events",
  "serde",
@@ -1010,7 +1023,7 @@ dependencies = [
 
 [[package]]
 name = "drgtw-keys"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "drgtw-config",
  "http 1.4.1",
@@ -1020,7 +1033,7 @@ dependencies = [
 
 [[package]]
 name = "drgtw-mcp"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "futures",
  "reqwest 0.12.28",
@@ -1035,7 +1048,7 @@ dependencies = [
 
 [[package]]
 name = "drgtw-ner"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "ndarray 0.16.1",
  "ort",
@@ -1048,7 +1061,7 @@ dependencies = [
 
 [[package]]
 name = "drgtw-otel"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "anyhow",
  "drgtw-config",
@@ -1068,7 +1081,7 @@ dependencies = [
 
 [[package]]
 name = "drgtw-pii"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "drgtw-config",
  "drgtw-ner",
@@ -1083,7 +1096,7 @@ dependencies = [
 
 [[package]]
 name = "drgtw-proxy"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "arc-swap",
  "aws-credential-types",
@@ -1093,6 +1106,7 @@ dependencies = [
  "crc32fast",
  "drgtw-config",
  "drgtw-events",
+ "drgtw-guardrails",
  "drgtw-history",
  "drgtw-keys",
  "drgtw-mcp",
@@ -1123,7 +1137,7 @@ dependencies = [
 
 [[package]]
 name = "drgtw-trace"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "filetime",
  "flate2",
@@ -1137,7 +1151,7 @@ dependencies = [
 
 [[package]]
 name = "drgtw-ui"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "axum",
  "datastar",
@@ -1165,7 +1179,7 @@ dependencies = [
 
 [[package]]
 name = "drgtw-ui-auth"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -1178,7 +1192,7 @@ dependencies = [
 
 [[package]]
 name = "drgtw-vault"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "aes-gcm",
  "hex",
@@ -3335,6 +3349,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "serde_ignored"
+version = "0.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "115dffd5f3853e06e746965a20dcbae6ee747ae30b543d91b0e089668bb07798"
+dependencies = [
+ "serde",
+ "serde_core",
 ]
 
 [[package]]

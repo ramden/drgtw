@@ -1,0 +1,252 @@
+# PII Pseudonymization — Deployment Guide
+
+DRGTW masks personal data **before** it leaves your network. Detected PII is
+replaced with stable pseudonyms in the outbound prompt; the original values are
+restored in the response on the way back. This guide is operator-focused: what
+masks out of the box, what needs a model, how to ship the model, and a complete
+GDPR configuration.
+
+For the field-by-field reference see
+[config-reference.md → `[pii]`](config-reference.md#pii).
+
+---
+
+## What gets masked
+
+There are two detection layers.
+
+### Regex recognizers — work out of the box, no model
+
+These run with zero extra setup the moment `[pii]` is enabled:
+
+| Entity | Alias | Notes |
+|--------|-------|-------|
+| `EMAIL_ADDRESS` | `EMAIL` | |
+| `PHONE_NUMBER` | `PHONE` | |
+| `IBAN_CODE` | `IBAN` | |
+| `CREDIT_CARD` | `CC`, `CARD` | |
+| `IP_ADDRESS` | `IP` | IPv4 and IPv6 |
+| `DATE_TIME` | `DATE`, `DATETIME` | German `DD.MM.YYYY`, ISO `YYYY-MM-DD` |
+
+`DATE_TIME` is **high recall, best-effort**: it validates only `month ≤ 12` and
+`day ≤ 31`, so it will over-match things that look like dates (version strings,
+ratios). If those false positives are unacceptable, drop `DATE_TIME` from your
+`entities` allow-list or add it to `disabled_recognizers`.
+
+### NER recognizer — needs a model
+
+Names of people, organizations, and places are **not** pattern-matchable. They
+require the multilingual NER model configured under `[pii.ner]`:
+
+| Entity | Alias |
+|--------|-------|
+| `PERSON` | — |
+| `ORGANIZATION` | `ORG` |
+| `LOCATION` | `LOC` |
+
+**Without a `[pii.ner]` block, `PERSON` / `ORGANIZATION` / `LOCATION` are never
+masked**, even if you list them in `entities`. The gateway logs a boot warning in
+this case (see [Boot warning](#boot-warning)).
+
+### No built-in detector
+
+`NATIONAL_ID` and `NRP` have **no built-in detector** in this release. They are
+reachable only via a `[[pii.custom_recognizers]]` pattern or a future NER label.
+Listing them in `entities` alone masks nothing.
+
+---
+
+## The entities allow-list
+
+`entities` restricts which **kinds** are kept. It is Presidio-style,
+case-insensitive, and accepts the aliases above.
+
+```toml
+[pii]
+entities = ["PERSON", "ORG", "EMAIL", "IBAN"]
+```
+
+- **Absent** → keep every kind (default).
+- **Empty list** → **rejected at validation**. An empty allow-list would silently
+  mask nothing; express "off" as `enabled_by_default = false` instead.
+- Filtering is **post-scan**: recognizers still run, then detections whose kind is
+  not in the list are dropped. So narrowing `entities` does not save inference
+  cost — it only controls what gets pseudonymized.
+
+---
+
+## Shipping the NER model
+
+The model (`model_quantized.onnx`, `tokenizer.json`, `config.json`) is **not** in
+the repo and **not** in the base/slim image — it is gitignored and dockerignored.
+There are two supported ways to get it onto a box.
+
+### Option A — mount a volume (slim image)
+
+Place the model on the host and bind-mount it:
+
+```bash
+docker run \
+  -v /host/ner-multilingual:/app/models/ner-multilingual \
+  -v "$PWD/drgtw.toml:/app/drgtw.toml" \
+  <user>/drgtw:<version>
+```
+
+```toml
+[pii.ner]
+model_dir = "/app/models/ner-multilingual"
+```
+
+The Dockerfiles declare `VOLUME ["/app/models", "/app/data"]`, so the mount point
+already exists.
+
+### Option B — model-bundled image (`-models` tag, v0.0.8+)
+
+The `<user>/drgtw:<version>-models` image **bakes the model in** at
+`/app/models/ner-multilingual`. No volume needed:
+
+```bash
+docker run -v "$PWD/drgtw.toml:/app/drgtw.toml" <user>/drgtw:<version>-models
+```
+
+```toml
+[pii.ner]
+model_dir = "/app/models/ner-multilingual"
+```
+
+Use the slim image + volume when you manage model artifacts yourself; use the
+`-models` tag for zero-config deploys.
+
+---
+
+## A complete GDPR configuration
+
+Fail-closed, names masked, runtime errors never leak, pseudonyms reversible, plus
+a jailbreak guardrail.
+
+```toml
+[pii]
+enabled_by_default = true          # mask every request unless caller sends x-drgtw-pii: off
+require_ner        = true          # refuse to boot if NER is missing/misconfigured
+entities = ["PERSON", "ORG", "LOCATION", "EMAIL", "PHONE", "IBAN", "CREDIT_CARD"]
+
+[pii.ner]
+model_dir       = "/app/models/ner-multilingual"
+score_threshold = 0.5
+fail_mode       = "closed"         # a runtime NER error fails the request — never forwards unmasked
+timeout_ms      = 5000
+workers         = 2
+
+[pii.vault]
+path = "/app/data/pii-vault.db"    # mount /app/data so the vault survives restarts
+key  = "${DRGTW_PII_VAULT_KEY}"    # 64 hex chars, supplied via env
+
+# Block obvious prompt-injection attempts before the prompt is even pseudonymized.
+[[guardrails.rules]]
+name   = "jailbreak"
+kind   = "prompt_injection"
+phase  = "pre"
+action = "block"                   # returns 403, no upstream call
+```
+
+Run it strictly so a misplaced key can't silently disable masking:
+
+```bash
+drgtw --config /app/drgtw.toml --strict-config
+```
+
+Why `require_ner = true` **and** `--strict-config`? They guard different
+failures. `require_ner` catches *"I forgot the `[pii.ner]` block."*
+`--strict-config` catches *"I wrote `[ner]` instead of `[pii.ner]`"* — a block that
+**looks** present but never binds. Together they make "names silently unmasked"
+impossible to ship.
+
+---
+
+## Boot warning
+
+If `enabled_by_default = true` but there is **no** `[pii.ner]` block and
+`require_ner = false`, the gateway boots and logs:
+
+```
+PERSON/ORGANIZATION/LOCATION names are NOT masked
+```
+
+Regex entities (email, phone, IBAN, credit card, IP, date) still mask — only the
+NER-backed kinds are affected. Set `require_ner = true` if a missing NER block
+should be a hard failure instead of a warning.
+
+### Boot failures (fail-closed)
+
+| Situation | Result |
+|-----------|--------|
+| `require_ner = true`, no `[pii.ner]` | **hard boot failure** |
+| `[pii.ner]` present, `model_dir` missing/invalid | **hard boot failure** |
+| `[pii.ner]` present and valid, runtime inference error | governed by `fail_mode` |
+
+`fail_mode` (`open` | `closed`) covers **only runtime NER errors** — timeout, full
+queue, inference failure. It does **not** cover a missing model, which always
+fails at boot regardless of `fail_mode`.
+
+---
+
+## Guardrails (content filter)
+
+Guardrails are a separate surface (`[[guardrails.rules]]`) from PII masking but
+often deployed alongside it. Three kinds — `prompt_injection`, `banned_content`,
+`contact_info` — each with a `phase` (`pre` / `post` / `both`) and an `action`
+(`block` / `redact` / `flag`).
+
+Two honest limitations in v0.0.8:
+
+- **`redact` detects and logs but does not yet mutate the body.** Use `block` for
+  hard enforcement; body-redaction is a fast-follow.
+- **Post-call rules run on non-streaming responses only.** Streaming responses are
+  not scanned.
+
+Full reference:
+[config-reference.md → `[[guardrails.rules]]`](config-reference.md#guardrailsrules).
+
+---
+
+## Troubleshooting
+
+### "I see `ner=false` in the logs and names aren't masked"
+
+The `[pii.ner]` block didn't bind. The usual cause is a **misplaced or misspelled
+key** that was silently ignored — for example:
+
+- `[ner]` written at the top level instead of `[pii.ner]`.
+- `score_threshold` placed under `[pii]` instead of `[pii.ner]`.
+
+Re-run with `--strict-config`. Instead of a warning, the gateway will now fail to
+boot and name the offending key (dotted, e.g. `pii.ner.workers`), so you can move
+it to the correct table.
+
+```bash
+drgtw --config drgtw.toml --strict-config
+```
+
+For a production lockdown, also set `require_ner = true` — then a missing
+`[pii.ner]` is a hard failure rather than a warning you might miss.
+
+### "The gateway won't start"
+
+Check, in order:
+
+1. `require_ner = true` but no `[pii.ner]` block → add the block or set
+   `require_ner = false`.
+2. `[pii.ner].model_dir` points at a directory without the model artifacts → mount
+   the volume or switch to the `-models` image tag.
+3. `[pii.vault].key` is not exactly 64 hex characters after `${ENV}` resolution →
+   fix the key (32 bytes, hex-encoded).
+
+### "Dates / version numbers are being masked"
+
+`DATE_TIME` is high-recall by design. Drop it from `entities`, or add
+`disabled_recognizers = ["DATE_TIME"]`.
+
+### "I need to mask employee numbers / national IDs"
+
+Those have no built-in detector. Add a `[[pii.custom_recognizers]]` block with a
+regex pattern; its `name` then becomes a valid `entities` entry.

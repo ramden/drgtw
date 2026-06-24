@@ -69,6 +69,7 @@ fn tiny_max_body_anthropic_config(mock_base_url: &str) -> Arc<Config> {
         model_aliases: Default::default(),
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     })
 }
 
@@ -106,6 +107,7 @@ fn anthropic_config(mock_base_url: &str) -> Arc<Config> {
         model_aliases: Default::default(),
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     })
 }
 
@@ -165,6 +167,7 @@ fn dual_config(openai_base: &str, anthropic_base: &str) -> Arc<Config> {
         model_aliases: Default::default(),
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     })
 }
 
@@ -601,6 +604,7 @@ async fn test_messages_rate_limit_exhausted_returns_429_anthropic_body() {
         model_aliases: Default::default(),
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     });
 
     // First request — should succeed (mock provides a response).

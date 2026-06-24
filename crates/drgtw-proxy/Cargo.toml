@@ -11,6 +11,7 @@ drgtw-events.workspace = true
 drgtw-mcp.workspace = true
 drgtw-otel.workspace = true
 drgtw-pii.workspace = true
+drgtw-guardrails.workspace = true
 drgtw-trace.workspace = true
 drgtw-vault.workspace = true
 # Optional Postgres history store for fire-and-forget usage recording. Depended

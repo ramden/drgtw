@@ -478,6 +478,33 @@ async fn proxy_endpoint(
             .or_insert_with(|| serde_json::Value::String("bedrock-2023-05-31".to_owned()));
     }
 
+    // 8c. Pre-call content guardrails (v0.0.8). Run on the RAW user text BEFORE
+    //     pseudonymisation so jailbreak / banned-content patterns match the
+    //     original prompt (not `EMAIL_1` placeholders). `Block` rejects the
+    //     request; `Flag` logs; `Redact` detection is logged (request-body
+    //     redaction enforcement is a fast-follow — the body is not mutated here).
+    if let Some(guardrails) = live.guardrails.as_ref() {
+        let text = drgtw_pii::collect_request_text(spec.body_format, &parsed);
+        if !text.is_empty() {
+            match guardrails.check_request(&text) {
+                drgtw_guardrails::GuardrailOutcome::Block(reason) => {
+                    return Err(ProxyError::GuardrailBlocked { reason, fmt: spec.error_fmt });
+                }
+                drgtw_guardrails::GuardrailOutcome::Flag(reason) => {
+                    tracing::warn!(guardrail = %reason, "request flagged by content guardrail");
+                }
+                drgtw_guardrails::GuardrailOutcome::Redact(spans) => {
+                    tracing::warn!(
+                        spans = spans.len(),
+                        "request guardrail matched redact spans; request-body redaction \
+                         enforcement is not yet applied (use action = \"block\" to reject)"
+                    );
+                }
+                drgtw_guardrails::GuardrailOutcome::Allow => {}
+            }
+        }
+    }
+
     // 9. PII request rewrite (WP 3.4 / 4.4). The pseudonymised bytes are reused
     //    as-is across every fallback attempt (same map — required for restore).
     let (upstream_body, pii_map) = if pii_mode == PiiMode::On {
@@ -879,6 +906,34 @@ async fn relay_with_usage(
         }
         _ => (parsed_body, resp_bytes),
     };
+
+    // Post-call content guardrails (v0.0.8), non-streaming only. Run on the
+    // model's response text. `Block` rejects the (already-received) response
+    // with a content-filter error; `Flag`/`Redact` are logged. Streaming
+    // responses are NOT scanned (documented limitation — the body is relayed
+    // chunk-by-chunk before it can be buffered).
+    if let (Some(guardrails), Some(body)) = (ctx.state.live.load().guardrails.as_ref(), parsed_body.as_ref()) {
+        let text = drgtw_pii::collect_response_text(ctx.spec.body_format, body);
+        if !text.is_empty() {
+            match guardrails.check_response(&text) {
+                drgtw_guardrails::GuardrailOutcome::Block(reason) => {
+                    emit_trace_from_ctx(&ctx, 403, None, None, Some(format!("response blocked by guardrail: {reason}")));
+                    return Err(ProxyError::GuardrailBlocked { reason, fmt: ctx.spec.error_fmt });
+                }
+                drgtw_guardrails::GuardrailOutcome::Flag(reason) => {
+                    tracing::warn!(guardrail = %reason, "response flagged by content guardrail");
+                }
+                drgtw_guardrails::GuardrailOutcome::Redact(spans) => {
+                    tracing::warn!(
+                        spans = spans.len(),
+                        "response guardrail matched redact spans; response-body redaction \
+                         enforcement is not yet applied (use action = \"block\" to reject)"
+                    );
+                }
+                drgtw_guardrails::GuardrailOutcome::Allow => {}
+            }
+        }
+    }
 
     let (input, output) = parsed_body
         .as_ref()

@@ -5,11 +5,14 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use std::collections::HashSet;
+
 use crate::ner_bridge::NerRecognizer;
 use crate::recognizers::{
-    CreditCardRecognizer, CustomRegexRecognizer, EmailRecognizer, IbanRecognizer, PhoneRecognizer,
+    CreditCardRecognizer, CustomRegexRecognizer, DateTimeRecognizer, EmailRecognizer,
+    IbanRecognizer, IpAddressRecognizer, PhoneRecognizer,
 };
-use crate::{DetectError, Detection, Recognizer};
+use crate::{DetectError, Detection, EntityKind, Recognizer};
 use drgtw_config::PiiConfig;
 
 #[derive(Debug, thiserror::Error)]
@@ -36,11 +39,20 @@ pub enum EngineBuildError {
     /// hex-decode failure path is reported generically.
     #[error("vault open error: {0}")]
     Vault(String),
+    /// Content-guardrail engine failed to build (e.g. an invalid guardrail
+    /// regex pattern). Carried as a string so `drgtw-pii` need not depend on
+    /// `drgtw-guardrails`; the proxy maps the concrete error into this variant.
+    /// Boot-fatal, like the other variants.
+    #[error("guardrail build error: {0}")]
+    Guardrail(String),
 }
 
 /// Recognizer registry. Built once at startup, shared across requests.
 pub struct PiiEngine {
     recognizers: Vec<Box<dyn Recognizer>>,
+    /// When `Some`, only detections whose kind is in the set are kept (the
+    /// `pii.entities` allow-list). When `None`, all detected kinds are kept.
+    allowed_kinds: Option<HashSet<EntityKind>>,
 }
 
 impl fmt::Debug for PiiEngine {
@@ -80,6 +92,8 @@ impl PiiEngine {
         push_if_enabled!("iban", IbanRecognizer::new());
         push_if_enabled!("credit_card", CreditCardRecognizer::new());
         push_if_enabled!("phone", PhoneRecognizer::new());
+        push_if_enabled!("ip_address", IpAddressRecognizer::new());
+        push_if_enabled!("datetime", DateTimeRecognizer::new());
 
         for cr in &config.custom_recognizers {
             let rec = CustomRegexRecognizer::new(&cr.name, &cr.pattern).map_err(|source| {
@@ -91,7 +105,12 @@ impl PiiEngine {
             recognizers.push(Box::new(rec));
         }
 
-        Ok(Self { recognizers })
+        let allowed_kinds = build_allowed_kinds(config);
+
+        Ok(Self {
+            recognizers,
+            allowed_kinds,
+        })
     }
 
     /// Run all recognizers, merge results, resolve overlaps:
@@ -110,7 +129,7 @@ impl PiiEngine {
             .flat_map(|(idx, r)| r.detect(text).into_iter().map(move |d| (idx, d)))
             .collect();
 
-        Self::merge_tagged(tagged)
+        self.filter_allowed(Self::merge_tagged(tagged))
     }
 
     /// Fallible scan: runs all recognizers via [`Recognizer::try_detect`] and
@@ -125,7 +144,18 @@ impl PiiEngine {
             let dets = r.try_detect(text)?;
             tagged.extend(dets.into_iter().map(|d| (idx, d)));
         }
-        Ok(Self::merge_tagged(tagged))
+        Ok(self.filter_allowed(Self::merge_tagged(tagged)))
+    }
+
+    /// Apply the `pii.entities` allow-list (no-op when `allowed_kinds` is None).
+    fn filter_allowed(&self, dets: Vec<Detection>) -> Vec<Detection> {
+        match &self.allowed_kinds {
+            None => dets,
+            Some(allowed) => dets
+                .into_iter()
+                .filter(|d| allowed.contains(&d.kind))
+                .collect(),
+        }
     }
 
     /// Merge and de-overlap tagged detections (shared by `scan` and `try_scan`).
@@ -158,6 +188,32 @@ impl PiiEngine {
     pub fn push_recognizer(&mut self, recognizer: Box<dyn Recognizer>) {
         self.recognizers.push(recognizer);
     }
+}
+
+/// Build the `allowed_kinds` set from `config.entities`.
+///
+/// Returns `None` when no allow-list is configured (keep everything). Each name
+/// is a presidio-style built-in (mapped via the config canonicaliser →
+/// [`EntityKind`]) or a `custom_recognizers` name (→ [`EntityKind::Custom`] with
+/// the recognizer's exact casing). Unknown names are skipped — validation in
+/// `drgtw-config` already rejects them before this runs.
+fn build_allowed_kinds(config: &PiiConfig) -> Option<HashSet<EntityKind>> {
+    let names = config.entities.as_ref()?;
+    let mut set = HashSet::new();
+    for name in names {
+        if let Some(canon) = drgtw_config::canonical_pii_entity_name(name) {
+            if let Some(kind) = EntityKind::from_canonical_name(canon) {
+                set.insert(kind);
+            }
+        } else if let Some(cr) = config
+            .custom_recognizers
+            .iter()
+            .find(|cr| cr.name.eq_ignore_ascii_case(name.trim()))
+        {
+            set.insert(EntityKind::Custom(std::sync::Arc::from(cr.name.as_str())));
+        }
+    }
+    Some(set)
 }
 
 /// Build a [`PiiEngine`] from config and, when `pii_cfg.ner` is `Some`, load
@@ -222,9 +278,11 @@ mod tests {
             enabled_by_default: true,
             disabled_recognizers: names.iter().map(|s| s.to_string()).collect(),
             custom_recognizers: vec![],
+            entities: None,
             ner: None,
             vault: None,
             embeddings_require_vault: false,
+            require_ner: false,
         }
     }
 
@@ -236,9 +294,24 @@ mod tests {
                 name: name.to_string(),
                 pattern: pattern.to_string(),
             }],
+            entities: None,
             ner: None,
             vault: None,
             embeddings_require_vault: false,
+            require_ner: false,
+        }
+    }
+
+    fn config_with_entities(entities: &[&str]) -> PiiConfig {
+        PiiConfig {
+            enabled_by_default: true,
+            disabled_recognizers: vec![],
+            custom_recognizers: vec![],
+            entities: Some(entities.iter().map(|s| s.to_string()).collect()),
+            ner: None,
+            vault: None,
+            embeddings_require_vault: false,
+            require_ner: false,
         }
     }
 
@@ -381,9 +454,11 @@ mod tests {
                     pattern: r"hello world".to_string(),
                 },
             ],
+            entities: None,
             ner: None,
             vault: None,
             embeddings_require_vault: false,
+            require_ner: false,
         };
         let engine = PiiEngine::from_config(&cfg).unwrap();
         let text = "say hello world!";
@@ -413,9 +488,11 @@ mod tests {
                     pattern: r"TOKEN".to_string(),
                 },
             ],
+            entities: None,
             ner: None,
             vault: None,
             embeddings_require_vault: false,
+            require_ner: false,
         };
         let engine = PiiEngine::from_config(&cfg).unwrap();
         let text = "check TOKEN here";
@@ -464,6 +541,64 @@ mod tests {
         for w in dets.windows(2) {
             assert!(w[1].start >= w[0].end, "non-overlapping invariant violated");
         }
+    }
+
+    // ── entities allow-list ────────────────────────────────────────────────
+
+    #[test]
+    fn entities_none_keeps_all_kinds() {
+        let engine = PiiEngine::from_config(&default_config()).unwrap();
+        let text = "mail alice@example.com card 4111 1111 1111 1111";
+        let kinds: Vec<_> = engine.scan(text).into_iter().map(|d| d.kind).collect();
+        assert!(kinds.contains(&EntityKind::Email));
+        assert!(kinds.contains(&EntityKind::CreditCard));
+    }
+
+    #[test]
+    fn entities_allow_list_filters_to_subset() {
+        let cfg = config_with_entities(&["EMAIL_ADDRESS"]);
+        let engine = PiiEngine::from_config(&cfg).unwrap();
+        let text = "mail alice@example.com card 4111 1111 1111 1111";
+        let kinds: Vec<_> = engine.scan(text).into_iter().map(|d| d.kind).collect();
+        assert!(kinds.contains(&EntityKind::Email), "email kept");
+        assert!(
+            !kinds.contains(&EntityKind::CreditCard),
+            "credit card filtered out"
+        );
+    }
+
+    #[test]
+    fn entities_allow_list_accepts_aliases() {
+        // "EMAIL" alias + "CC" alias.
+        let cfg = config_with_entities(&["EMAIL", "CC"]);
+        let engine = PiiEngine::from_config(&cfg).unwrap();
+        let text = "mail alice@example.com card 4111 1111 1111 1111 phone +49 89 1234567";
+        let kinds: Vec<_> = engine.scan(text).into_iter().map(|d| d.kind).collect();
+        assert!(kinds.contains(&EntityKind::Email));
+        assert!(kinds.contains(&EntityKind::CreditCard));
+        assert!(!kinds.contains(&EntityKind::Phone), "phone filtered out");
+    }
+
+    #[test]
+    fn entities_allow_list_includes_new_ip_kind() {
+        let cfg = config_with_entities(&["IP_ADDRESS"]);
+        let engine = PiiEngine::from_config(&cfg).unwrap();
+        let text = "host 10.0.0.1 mail a@b.de";
+        let kinds: Vec<_> = engine.scan(text).into_iter().map(|d| d.kind).collect();
+        assert!(kinds.contains(&EntityKind::IpAddress));
+        assert!(!kinds.contains(&EntityKind::Email));
+    }
+
+    #[test]
+    fn scan_detects_ip_and_date_by_default() {
+        let engine = PiiEngine::from_config(&default_config()).unwrap();
+        let kinds: Vec<_> = engine
+            .scan("server 192.168.0.1 on 31.12.2024")
+            .into_iter()
+            .map(|d| d.kind)
+            .collect();
+        assert!(kinds.contains(&EntityKind::IpAddress));
+        assert!(kinds.contains(&EntityKind::DateTime));
     }
 
     #[test]

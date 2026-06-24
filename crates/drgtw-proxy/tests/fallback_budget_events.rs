@@ -180,6 +180,7 @@ async fn test_fallback_503_then_200_records_attempt_and_connection() {
         model_aliases: Default::default(),
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     });
 
     let app = test_router(config);
@@ -259,6 +260,7 @@ async fn test_fallback_disabled_relays_503_no_second_attempt() {
         model_aliases: Default::default(),
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     });
 
     let app = test_router(config);
@@ -324,6 +326,7 @@ async fn test_non_retriable_400_no_failover() {
         model_aliases: Default::default(),
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     });
 
     let app = test_router(config);
@@ -389,6 +392,7 @@ async fn test_all_candidates_fail_relays_last() {
         model_aliases: Default::default(),
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     });
 
     let app = test_router(config);
@@ -457,6 +461,7 @@ async fn test_budget_exhausted_after_first_request() {
         model_aliases: Default::default(),
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     });
 
     let app = test_router(config);
@@ -540,6 +545,7 @@ async fn test_event_non_stream_fields() {
         model_aliases: Default::default(),
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     });
 
     let app = test_router(config);
@@ -619,6 +625,7 @@ async fn test_event_stream_openai_usage() {
         model_aliases: Default::default(),
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     });
 
     let app = test_router(config);
@@ -716,6 +723,7 @@ async fn test_event_stream_anthropic_usage() {
         model_aliases: Default::default(),
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     });
 
     let app = test_router(config);
@@ -794,6 +802,7 @@ async fn test_auth_failure_emits_no_event() {
         model_aliases: Default::default(),
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     });
 
     let app = test_router(config);
@@ -858,6 +867,7 @@ async fn test_upstream_error_emits_event() {
         model_aliases: Default::default(),
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     });
 
     let app = test_router(config);

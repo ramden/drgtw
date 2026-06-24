@@ -233,6 +233,7 @@ async fn test_alias_routes_and_forwards_resolved_model() {
         model_aliases: aliases,
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     });
 
     let app = test_router(config);
@@ -293,6 +294,7 @@ async fn test_alias_allowlist_applies_to_resolved_model() {
         model_aliases: aliases,
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     });
 
     let app = test_router(config);
@@ -336,6 +338,7 @@ async fn test_unaliased_model_untouched() {
         model_aliases: aliases,
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     });
 
     let app = test_router(config);
@@ -381,6 +384,7 @@ fn meta_config(upstream_uri: &str, sink_uri: &str) -> Arc<Config> {
         model_aliases: Default::default(),
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     })
 }
 

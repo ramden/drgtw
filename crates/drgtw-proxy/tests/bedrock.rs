@@ -245,6 +245,7 @@ async fn bedrock_openai_compat_routes_and_bills() {
         model_aliases: Default::default(),
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     });
 
     let app = test_router(config);
@@ -331,6 +332,7 @@ async fn bedrock_openai_compat_streams_sse() {
         model_aliases: Default::default(),
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     });
 
     let app = test_router(config);
@@ -398,6 +400,7 @@ async fn bedrock_cost_wildcard_key_matches() {
         model_aliases: Default::default(),
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     });
 
     let app = test_router(config);
@@ -473,6 +476,7 @@ async fn bedrock_invoke_non_streaming_routes_and_bills() {
         model_aliases: Default::default(),
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     });
 
     let app = test_router(config);
@@ -547,6 +551,7 @@ async fn bedrock_invoke_preserves_client_anthropic_version() {
         model_aliases: Default::default(),
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     });
 
     let app = test_router(config);
@@ -612,6 +617,7 @@ async fn bedrock_invoke_strips_model_into_path() {
         model_aliases: Default::default(),
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     });
 
     let app = test_router(config);
@@ -672,6 +678,7 @@ async fn bedrock_streaming_request_rejected_no_upstream_call() {
         model_aliases: Default::default(),
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     });
 
     let app = test_router(config);

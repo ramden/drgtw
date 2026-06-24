@@ -64,9 +64,11 @@ fn openai_pii_config(mock_base_url: &str, pii_enabled: bool) -> Arc<Config> {
             enabled_by_default: pii_enabled,
             disabled_recognizers: vec![],
             custom_recognizers: vec![],
+            entities: None,
             ner: None,
             vault: None,
             embeddings_require_vault: false,
+            require_ner: false,
         },
         events: None,
         fallback: Default::default(),
@@ -75,6 +77,7 @@ fn openai_pii_config(mock_base_url: &str, pii_enabled: bool) -> Arc<Config> {
         model_aliases: Default::default(),
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     })
 }
 
@@ -106,9 +109,11 @@ fn anthropic_pii_config(mock_base_url: &str, pii_enabled: bool) -> Arc<Config> {
             enabled_by_default: pii_enabled,
             disabled_recognizers: vec![],
             custom_recognizers: vec![],
+            entities: None,
             ner: None,
             vault: None,
             embeddings_require_vault: false,
+            require_ner: false,
         },
         events: None,
         fallback: Default::default(),
@@ -117,6 +122,7 @@ fn anthropic_pii_config(mock_base_url: &str, pii_enabled: bool) -> Arc<Config> {
         model_aliases: Default::default(),
         otel: Default::default(),
         ui: Default::default(),
+        guardrails: Default::default(),
     })
 }
 

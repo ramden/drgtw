@@ -12,6 +12,7 @@ use axum::routing::{get, post};
 use drgtw_config::Config;
 use drgtw_events::{EventSink, ModelCost, UsageEvent};
 use drgtw_keys::{BudgetTracker, BudgetSnapshot, KeyStore, RateLimiter, RateLimiterSnapshot};
+use drgtw_guardrails::GuardrailEngine;
 use drgtw_pii::{EntityStore, PiiEngine};
 
 mod converse;
@@ -43,6 +44,11 @@ pub struct Live {
     pub budget: BudgetTracker,
     /// PII engine (WP 3.4). Rebuilt when `pii` config changes.
     pub pii: Arc<PiiEngine>,
+    /// Content-guardrail engine (v0.0.8). `Some` when `[guardrails]` has at
+    /// least one rule; `None` disables the guardrail hooks (a cheap branch on
+    /// the hot path). Rebuilt when `guardrails` config changes. Shares the PII
+    /// engine `Arc` above for `contact_info` guardrails.
+    pub guardrails: Option<Arc<GuardrailEngine>>,
     /// MCP gateway (WP-C). Rebuilt when `mcp_servers` config changes.
     pub mcp: Arc<drgtw_mcp::McpGateway>,
     /// Per-connection cost tables, pre-converted to `drgtw_events::ModelCost`

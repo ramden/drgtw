@@ -122,6 +122,72 @@ pub fn try_pseudonymize_body(
     }
 }
 
+/// Collect the user-authored request text for content-guardrail scanning
+/// (v0.0.8). OpenAI: each `messages[].content` (string or text parts).
+/// Anthropic: top-level `system` plus each `messages[].content`. Parts are
+/// newline-joined. Returns an empty string when there is no text to scan.
+pub fn collect_request_text(format: BodyFormat, body: &serde_json::Value) -> String {
+    let mut out = String::new();
+    match format {
+        BodyFormat::OpenAiChat => {
+            if let Some(msgs) = body.get("messages").and_then(|m| m.as_array()) {
+                for msg in msgs {
+                    push_content_text(msg.get("content"), &mut out);
+                }
+            }
+        }
+        BodyFormat::AnthropicMessages => {
+            push_content_text(body.get("system"), &mut out);
+            if let Some(msgs) = body.get("messages").and_then(|m| m.as_array()) {
+                for msg in msgs {
+                    push_content_text(msg.get("content"), &mut out);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Collect the model-generated response text for content-guardrail scanning
+/// (v0.0.8). OpenAI: `choices[].message.content`. Anthropic: `content[].text`.
+pub fn collect_response_text(format: BodyFormat, body: &serde_json::Value) -> String {
+    let mut out = String::new();
+    match format {
+        BodyFormat::OpenAiChat => {
+            if let Some(choices) = body.get("choices").and_then(|c| c.as_array()) {
+                for ch in choices {
+                    push_content_text(ch.get("message").and_then(|m| m.get("content")), &mut out);
+                }
+            }
+        }
+        BodyFormat::AnthropicMessages => {
+            push_content_text(body.get("content"), &mut out);
+        }
+    }
+    out
+}
+
+/// Append text extracted from a `content` value (string, or array of blocks
+/// each carrying a `text` field), newline-separated.
+fn push_content_text(content: Option<&serde_json::Value>, out: &mut String) {
+    let Some(content) = content else { return };
+    let mut push = |s: &str| {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(s);
+    };
+    if let Some(s) = content.as_str() {
+        push(s);
+    } else if let Some(parts) = content.as_array() {
+        for p in parts {
+            if let Some(t) = p.get("text").and_then(|t| t.as_str()) {
+                push(t);
+            }
+        }
+    }
+}
+
 // ── helpers ─────────────────────────────────────────────────────────────────
 
 /// Scan `text` with the engine (infallible) and pseudonymize it via the map.
