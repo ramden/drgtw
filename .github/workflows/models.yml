@@ -1,0 +1,70 @@
+name: Build model-bundled image
+
+# On-demand builder for the `<version>-models` image variant. Layers the
+# multilingual NER model onto an already-published slim image so PERSON / ORG /
+# LOCATION masking works with no volume mount.
+#
+# The model (model_quantized.onnx + tokenizer.json + config.json) is NOT in the
+# repo (gitignored). It is fetched from a RELEASE ASSET named
+# `ner-multilingual*.tar.gz` on the release for the given version, downloaded
+# via `gh` (authenticated by GITHUB_TOKEN — works for private repos, no public
+# hosting needed).
+#
+# Usage: gh workflow run models.yml -f version=0.0.8-alpha
+# (the release v<version> must already carry the ner-multilingual tarball asset)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Slim image version to layer the model onto (e.g. 0.0.8-alpha)"
+        required: true
+
+env:
+  IMAGE_NAME: drgtw
+
+jobs:
+  models:
+    name: Build and push <version>-models
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download NER model release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p _model_dl models-dist
+          gh release download "v${{ inputs.version }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern 'ner-multilingual*.tar.gz' \
+            --dir _model_dl
+          tar -xzf _model_dl/ner-multilingual*.tar.gz -C _model_dl
+          src="$(dirname "$(find _model_dl -name 'model_quantized.onnx' -o -name 'model.onnx' | head -n1)")"
+          if [ -z "${src}" ] || [ ! -d "${src}" ]; then
+            echo "::error::no model_quantized.onnx/model.onnx in the ner-multilingual asset"; exit 1
+          fi
+          rm -rf models-dist/ner-multilingual
+          cp -r "${src}" models-dist/ner-multilingual
+          echo "Staged:"; ls -l models-dist/ner-multilingual
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push model-bundled image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.models
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            BASE=${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ inputs.version }}
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ inputs.version }}-models
+          push: true
