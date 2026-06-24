@@ -62,6 +62,7 @@ COPY crates/drgtw-config/Cargo.toml  crates/drgtw-config/Cargo.toml
 COPY crates/drgtw-keys/Cargo.toml    crates/drgtw-keys/Cargo.toml
 COPY crates/drgtw-ner/Cargo.toml     crates/drgtw-ner/Cargo.toml
 COPY crates/drgtw-pii/Cargo.toml     crates/drgtw-pii/Cargo.toml
+COPY crates/drgtw-guardrails/Cargo.toml crates/drgtw-guardrails/Cargo.toml
 COPY crates/drgtw-proxy/Cargo.toml   crates/drgtw-proxy/Cargo.toml
 COPY crates/drgtw-events/Cargo.toml  crates/drgtw-events/Cargo.toml
 COPY crates/drgtw-vault/Cargo.toml   crates/drgtw-vault/Cargo.toml
@@ -80,6 +81,7 @@ RUN set -e; \
         crates/drgtw-keys \
         crates/drgtw-ner \
         crates/drgtw-pii \
+        crates/drgtw-guardrails \
         crates/drgtw-proxy \
         crates/drgtw-events \
         crates/drgtw-vault \
