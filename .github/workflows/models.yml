@@ -5,27 +5,40 @@ name: Build model-bundled image
 # LOCATION masking works with no volume mount.
 #
 # The model (model_quantized.onnx + tokenizer.json + config.json) is NOT in the
-# repo (gitignored). It is fetched from a RELEASE ASSET named
-# `ner-multilingual*.tar.gz` on the release for the given version, downloaded
+# repo (gitignored). It is fetched from a RELEASE ASSET (default
+# `ner-multilingual.tar.gz`) on the release for the given version, downloaded
 # via `gh` (authenticated by GITHUB_TOKEN — works for private repos, no public
 # hosting needed).
 #
-# Usage: gh workflow run models.yml -f version=0.0.8-alpha
-# (the release v<version> must already carry the ner-multilingual tarball asset)
+# Usage:
+#   # full model -> :<version>-models
+#   gh workflow run models.yml -f version=0.0.10-alpha
+#   # smaller model -> :<version>-models-small
+#   gh workflow run models.yml -f version=0.0.10-alpha \
+#     -f asset_pattern=ner-multilingual-small.tar.gz -f tag_suffix=-models-small
+# (the release v<version> must already carry the matching tarball asset)
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Slim image version to layer the model onto (e.g. 0.0.8-alpha)"
+        description: "Slim image version to layer the model onto (e.g. 0.0.10-alpha)"
         required: true
+      asset_pattern:
+        description: "Release-asset glob to fetch the model tarball"
+        required: false
+        default: "ner-multilingual.tar.gz"
+      tag_suffix:
+        description: "Suffix appended to the image tag (e.g. -models or -models-small)"
+        required: false
+        default: "-models"
 
 env:
   IMAGE_NAME: drgtw
 
 jobs:
   models:
-    name: Build and push <version>-models
+    name: Build and push <version>${{ inputs.tag_suffix }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -38,9 +51,11 @@ jobs:
           mkdir -p _model_dl models-dist
           gh release download "v${{ inputs.version }}" \
             --repo "$GITHUB_REPOSITORY" \
-            --pattern 'ner-multilingual*.tar.gz' \
+            --pattern '${{ inputs.asset_pattern }}' \
             --dir _model_dl
-          tar -xzf _model_dl/ner-multilingual*.tar.gz -C _model_dl
+          tarball="$(ls _model_dl/*.tar.gz | head -n1)"
+          test -n "${tarball}" || { echo "::error::no asset matched ${{ inputs.asset_pattern }}"; exit 1; }
+          tar -xzf "${tarball}" -C _model_dl
           src="$(dirname "$(find _model_dl -name 'model_quantized.onnx' -o -name 'model.onnx' | head -n1)")"
           if [ -z "${src}" ] || [ ! -d "${src}" ]; then
             echo "::error::no model_quantized.onnx/model.onnx in the ner-multilingual asset"; exit 1
@@ -66,5 +81,5 @@ jobs:
           platforms: linux/amd64,linux/arm64
           build-args: |
             BASE=${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ inputs.version }}
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ inputs.version }}-models
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ inputs.version }}${{ inputs.tag_suffix }}
           push: true

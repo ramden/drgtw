@@ -3,6 +3,24 @@
 All notable changes to drgtw are documented here. The format is loosely based
 on [Keep a Changelog](https://keepachangelog.com/); versions are pre-1.0 alpha.
 
+## [0.0.10-alpha] — 2026-06-25
+
+### Added — smaller NER model image
+- **`:<version>-models-small`** image variant: bundles a distilled multilingual
+  NER model (distilbert-base-multilingual-cased, hrl) instead of the larger
+  default. ~2× faster NER inference at near-identical recall (benchmarked 0.97
+  vs 0.98 recall, ~4.2ms vs ~8.5ms/sentence on a neutral multilingual set);
+  same `PER`/`ORG`/`LOC` masking and the same `/app/models/ner-multilingual`
+  path, so it is a drop-in for latency-sensitive deployments. The larger
+  `:<version>-models` image still ships unchanged.
+
+### Changed — model image workflow
+- **`models.yml`** is now parameterized with `asset_pattern` and `tag_suffix`
+  inputs (defaults `ner-multilingual.tar.gz` / `-models`), so any model variant
+  can be layered onto a slim base from its own release asset. The default asset
+  pattern is now an exact name (was a glob) so multiple model tarballs can
+  coexist on one release without ambiguity.
+
 ## [0.0.9-alpha] — 2026-06-25
 
 ### Added — NER performance
