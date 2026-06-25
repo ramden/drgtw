@@ -528,6 +528,33 @@ pub struct NerConfig {
     /// Max pending requests in the NER queue. Must be `> 0`.
     #[serde(default = "default_queue_capacity")]
     pub queue_capacity: usize,
+    /// Restrict NER scanning to chat messages of these roles. Role names are
+    /// matched case-insensitively against the message `role` field
+    /// (`system`, `user`, `assistant`, `developer`, `tool`). For the Anthropic
+    /// top-level `system` field the role is treated as `system`.
+    ///
+    /// When absent (`None`, the default), NER runs on every role — backward
+    /// compatible. When present, the NER model is only invoked for the listed
+    /// roles; the cheap regex recognizers (email, phone, IBAN, …) still run on
+    /// **every** role regardless of this setting. This lets deployments skip
+    /// NER on a large, static, PII-free system prompt without weakening
+    /// structured-identifier masking anywhere.
+    ///
+    /// An empty list is rejected at validation (it would disable NER on every
+    /// role — use `[pii]` `disabled_recognizers`/omit `[pii.ner]` for that).
+    #[serde(default)]
+    pub scan_roles: Option<Vec<String>>,
+    /// Capacity of the in-memory NER verdict cache, counted in distinct input
+    /// texts. `0` (the default) disables the cache. When `> 0`, NER results for
+    /// byte-identical input text are reused across requests, up to this many
+    /// entries, with least-recently-used eviction.
+    ///
+    /// The cache key is a 128-bit hash of the input text; **no plaintext is
+    /// retained** — only span offsets/kinds/scores are stored. This makes the
+    /// cache safe to enable for repeated content such as a static system prompt
+    /// or a large unchanged conversation prefix.
+    #[serde(default = "default_ner_cache_capacity")]
+    pub cache_capacity: usize,
 }
 
 fn default_score_threshold() -> f32 {
@@ -541,6 +568,9 @@ fn default_workers() -> usize {
 }
 fn default_queue_capacity() -> usize {
     64
+}
+fn default_ner_cache_capacity() -> usize {
+    0
 }
 
 /// Event-streaming sink configuration (WP 8.1).
@@ -2216,6 +2246,48 @@ model_dir = "models/ner"
         assert_eq!(ner.timeout_ms, 5000, "default timeout_ms 5000");
         assert_eq!(ner.workers, 2, "default workers 2");
         assert_eq!(ner.queue_capacity, 64, "default queue_capacity 64");
+        assert!(ner.scan_roles.is_none(), "default scan_roles is None (all roles)");
+        assert_eq!(ner.cache_capacity, 0, "default cache_capacity 0 (disabled)");
+    }
+
+    #[test]
+    fn test_ner_scan_roles_and_cache_parsed() {
+        let toml = r#"
+[pii.ner]
+model_dir = "models/ner"
+scan_roles = ["user", "assistant"]
+cache_capacity = 512
+"#;
+        let cfg = load_toml(toml).expect("ner scoping + cache config");
+        let ner = cfg.pii.ner.as_ref().expect("ner present");
+        assert_eq!(
+            ner.scan_roles.as_deref(),
+            Some(["user".to_string(), "assistant".to_string()].as_slice())
+        );
+        assert_eq!(ner.cache_capacity, 512);
+    }
+
+    #[test]
+    fn test_ner_empty_scan_roles_rejected() {
+        let toml = r#"
+[pii.ner]
+model_dir = "models/ner"
+scan_roles = []
+"#;
+        let err = load_toml(toml).expect_err("empty scan_roles must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("scan_roles"), "error should mention scan_roles: {msg}");
+    }
+
+    #[test]
+    fn test_ner_blank_scan_role_rejected() {
+        let toml = r#"
+[pii.ner]
+model_dir = "models/ner"
+scan_roles = ["user", "  "]
+"#;
+        let err = load_toml(toml).expect_err("blank scan_roles entry must be rejected");
+        assert!(err.to_string().contains("scan_roles"));
     }
 
     #[test]

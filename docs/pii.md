@@ -136,6 +136,8 @@ score_threshold = 0.5
 fail_mode       = "closed"         # a runtime NER error fails the request — never forwards unmasked
 timeout_ms      = 5000
 workers         = 2
+scan_roles      = ["user", "assistant"]  # skip NER on the static, PII-free system prompt
+cache_capacity  = 1024             # reuse NER verdicts for repeated text (no plaintext stored)
 
 [pii.vault]
 path = "/app/data/pii-vault.db"    # mount /app/data so the vault survives restarts
@@ -160,6 +162,35 @@ failures. `require_ner` catches *"I forgot the `[pii.ner]` block."*
 `--strict-config` catches *"I wrote `[ner]` instead of `[pii.ner]`"* — a block that
 **looks** present but never binds. Together they make "names silently unmasked"
 impossible to ship.
+
+---
+
+## NER performance: scoping and caching
+
+NER inference dominates the cost of a PII scan. Two `[pii.ner]` settings cut that
+cost for the common case where the same large text is scanned repeatedly — e.g. a
+static, developer-authored system prompt that every call in a multi-agent stack
+re-sends:
+
+- **`scan_roles`** — restrict the NER model to specific message roles. With
+  `scan_roles = ["user", "assistant"]` the system prompt is never run through
+  NER. The cheap regex recognizers (email, phone, IBAN, card, IP, date) still
+  scan **every** role, so structured-identifier masking is unchanged — only the
+  person/org/location model is scoped. The Anthropic top-level `system` field is
+  treated as role `system`. A missing/unknown role is always scanned (scoping
+  never silently drops masking).
+
+- **`cache_capacity`** — reuse NER verdicts for byte-identical input across
+  requests (LRU, default off). The key is a 128-bit hash of the text; only span
+  offsets/kinds/scores are stored, **never plaintext**, so the cache is safe to
+  enable on user content as well as the system prompt. Only successful
+  inferences are cached — timeouts/queue-full errors are not, so a transient
+  failure can't poison later requests.
+
+The two are independent and compose. With NER scoped off a 6 KB system prompt and
+verdicts cached for any other repeated context, per-call NER work drops to the
+genuinely new text — letting you keep masking on without raising `timeout_ms` or
+loosening `fail_mode`.
 
 ---
 

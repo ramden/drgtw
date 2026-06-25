@@ -53,6 +53,11 @@ pub struct PiiEngine {
     /// When `Some`, only detections whose kind is in the set are kept (the
     /// `pii.entities` allow-list). When `None`, all detected kinds are kept.
     allowed_kinds: Option<HashSet<EntityKind>>,
+    /// When `Some`, the NER recognizer only runs for messages whose role is in
+    /// this set (lowercased; the `pii.ner.scan_roles` allow-list). When `None`,
+    /// NER runs for every role. Regex recognizers are unaffected — they always
+    /// run regardless of role.
+    ner_scan_roles: Option<HashSet<String>>,
 }
 
 impl fmt::Debug for PiiEngine {
@@ -106,10 +111,12 @@ impl PiiEngine {
         }
 
         let allowed_kinds = build_allowed_kinds(config);
+        let ner_scan_roles = build_ner_scan_roles(config);
 
         Ok(Self {
             recognizers,
             allowed_kinds,
+            ner_scan_roles,
         })
     }
 
@@ -120,12 +127,30 @@ impl PiiEngine {
     /// This method uses the infallible `detect` path. Recognizers that may
     /// fail (e.g. NER with fail-closed mode) must be called via [`try_scan`].
     pub fn scan(&self, text: &str) -> Vec<Detection> {
+        self.scan_impl(text, true)
+    }
+
+    /// Like [`scan`](Self::scan) but scopes the NER recognizer by message
+    /// `role` per the `pii.ner.scan_roles` allow-list. Regex recognizers always
+    /// run. When no `scan_roles` is configured this is identical to `scan`.
+    ///
+    /// `role` is the chat message role (`"system"`, `"user"`, `"assistant"`,
+    /// …). `None` (unknown role) is treated as in-scope, so NER still runs —
+    /// scoping never silently drops masking on an unrecognised role.
+    pub fn scan_for_role(&self, text: &str, role: Option<&str>) -> Vec<Detection> {
+        self.scan_impl(text, self.ner_enabled_for_role(role))
+    }
+
+    /// Shared scan body. `include_ner` selects whether the `ner` recognizer
+    /// participates; all other recognizers always run.
+    fn scan_impl(&self, text: &str, include_ner: bool) -> Vec<Detection> {
         // Collect all candidates tagged with their recognizer index so we can
         // break ties by registration order.
         let tagged: Vec<(usize, Detection)> = self
             .recognizers
             .iter()
             .enumerate()
+            .filter(|(_, r)| include_ner || r.name() != "ner")
             .flat_map(|(idx, r)| r.detect(text).into_iter().map(move |d| (idx, d)))
             .collect();
 
@@ -139,12 +164,45 @@ impl PiiEngine {
     /// Use this for engines that include fail-closed NER recognizers; the
     /// result is the same as `scan` when all recognizers succeed.
     pub fn try_scan(&self, text: &str) -> Result<Vec<Detection>, DetectError> {
+        self.try_scan_impl(text, true)
+    }
+
+    /// Fallible counterpart to [`scan_for_role`](Self::scan_for_role): runs
+    /// every recognizer via [`Recognizer::try_detect`], scoping the NER
+    /// recognizer by `role`. Used by the request body walker so fail-closed
+    /// NER errors propagate.
+    pub fn try_scan_for_role(
+        &self,
+        text: &str,
+        role: Option<&str>,
+    ) -> Result<Vec<Detection>, DetectError> {
+        self.try_scan_impl(text, self.ner_enabled_for_role(role))
+    }
+
+    fn try_scan_impl(&self, text: &str, include_ner: bool) -> Result<Vec<Detection>, DetectError> {
         let mut tagged: Vec<(usize, Detection)> = Vec::new();
         for (idx, r) in self.recognizers.iter().enumerate() {
+            if !include_ner && r.name() == "ner" {
+                continue;
+            }
             let dets = r.try_detect(text)?;
             tagged.extend(dets.into_iter().map(|d| (idx, d)));
         }
         Ok(self.filter_allowed(Self::merge_tagged(tagged)))
+    }
+
+    /// Whether the NER recognizer should run for a message of the given `role`,
+    /// per the `pii.ner.scan_roles` allow-list.
+    fn ner_enabled_for_role(&self, role: Option<&str>) -> bool {
+        match &self.ner_scan_roles {
+            // No scoping configured: NER runs everywhere.
+            None => true,
+            Some(roles) => match role {
+                Some(r) => roles.contains(r.to_ascii_lowercase().as_str()),
+                // Unknown / missing role: scan to be safe (never silently skip).
+                None => true,
+            },
+        }
     }
 
     /// Apply the `pii.entities` allow-list (no-op when `allowed_kinds` is None).
@@ -216,6 +274,21 @@ fn build_allowed_kinds(config: &PiiConfig) -> Option<HashSet<EntityKind>> {
     Some(set)
 }
 
+/// Build the lowercased `ner_scan_roles` set from `config.ner.scan_roles`.
+///
+/// Returns `None` when NER is absent or `scan_roles` is unset (scan every
+/// role). Empty lists are rejected by config validation, so a present list is
+/// always non-empty here.
+fn build_ner_scan_roles(config: &PiiConfig) -> Option<HashSet<String>> {
+    let roles = config.ner.as_ref()?.scan_roles.as_ref()?;
+    Some(
+        roles
+            .iter()
+            .map(|r| r.trim().to_ascii_lowercase())
+            .collect(),
+    )
+}
+
 /// Build a [`PiiEngine`] from config and, when `pii_cfg.ner` is `Some`, load
 /// the NER model, build the pool, and attach a [`NerRecognizer`].
 ///
@@ -249,7 +322,12 @@ pub fn build_engine_with_ner(
         };
         let pool = Arc::new(drgtw_ner::NerPool::new(model, pool_cfg));
 
-        let recognizer = NerRecognizer::new(pool, ner_cfg.score_threshold, ner_cfg.fail_mode);
+        let recognizer = NerRecognizer::with_cache(
+            pool,
+            ner_cfg.score_threshold,
+            ner_cfg.fail_mode,
+            ner_cfg.cache_capacity,
+        );
         engine.push_recognizer(Box::new(recognizer));
     }
 
@@ -264,10 +342,57 @@ pub fn build_engine_with_ner(
 mod tests {
     use std::sync::Arc;
 
-    use drgtw_config::{CustomRecognizer, PiiConfig};
+    use drgtw_config::{CustomRecognizer, FailMode, NerConfig, PiiConfig};
 
     use super::*;
-    use crate::EntityKind;
+    use crate::{Detection, EntityKind, Recognizer};
+
+    /// Stand-in for the real NER recognizer in scoping tests: named `"ner"` so
+    /// the engine's role-scoping treats it as the NER recognizer, and emits one
+    /// `Person` detection covering the whole input. Avoids loading a model.
+    struct FakeNer;
+    impl Recognizer for FakeNer {
+        fn name(&self) -> &str {
+            "ner"
+        }
+        fn detect(&self, text: &str) -> Vec<Detection> {
+            if text.is_empty() {
+                return vec![];
+            }
+            vec![Detection {
+                start: 0,
+                end: text.len(),
+                kind: EntityKind::Person,
+            }]
+        }
+    }
+
+    fn ner_cfg_with_roles(scan_roles: Option<Vec<&str>>) -> NerConfig {
+        NerConfig {
+            model_dir: "models/ner".to_string(),
+            score_threshold: 0.5,
+            fail_mode: FailMode::Open,
+            timeout_ms: 5000,
+            workers: 2,
+            queue_capacity: 64,
+            scan_roles: scan_roles.map(|v| v.into_iter().map(str::to_string).collect()),
+            cache_capacity: 0,
+        }
+    }
+
+    fn engine_with_fake_ner(scan_roles: Option<Vec<&str>>) -> PiiEngine {
+        let cfg = PiiConfig {
+            ner: Some(ner_cfg_with_roles(scan_roles)),
+            ..PiiConfig::default()
+        };
+        let mut engine = PiiEngine::from_config(&cfg).unwrap();
+        engine.push_recognizer(Box::new(FakeNer));
+        engine
+    }
+
+    fn has_person(dets: &[Detection]) -> bool {
+        dets.iter().any(|d| d.kind == EntityKind::Person)
+    }
 
     fn default_config() -> PiiConfig {
         PiiConfig::default()
@@ -615,5 +740,66 @@ mod tests {
         let kinds: Vec<&EntityKind> = dets.iter().map(|d| &d.kind).collect();
         assert!(kinds.contains(&&EntityKind::Iban));
         assert!(kinds.contains(&&EntityKind::Email));
+    }
+
+    // ── NER scan-role scoping (R1) ─────────────────────────────────────────
+
+    #[test]
+    fn scan_for_role_no_scoping_runs_ner_on_every_role() {
+        let engine = engine_with_fake_ner(None);
+        assert!(has_person(&engine.scan_for_role("Angela Merkel", Some("system"))));
+        assert!(has_person(&engine.scan_for_role("Angela Merkel", Some("user"))));
+        // Plain scan also unaffected.
+        assert!(has_person(&engine.scan("Angela Merkel")));
+    }
+
+    #[test]
+    fn scan_for_role_scopes_ner_to_listed_roles() {
+        let engine = engine_with_fake_ner(Some(vec!["user", "assistant"]));
+        // In-scope roles still run NER.
+        assert!(has_person(&engine.scan_for_role("Angela Merkel", Some("user"))));
+        assert!(has_person(&engine.scan_for_role("Angela Merkel", Some("assistant"))));
+        // Excluded role: NER skipped → no Person detection.
+        assert!(!has_person(&engine.scan_for_role("Angela Merkel", Some("system"))));
+    }
+
+    #[test]
+    fn scan_for_role_is_case_insensitive() {
+        let engine = engine_with_fake_ner(Some(vec!["User"]));
+        assert!(has_person(&engine.scan_for_role("Angela Merkel", Some("USER"))));
+        assert!(!has_person(&engine.scan_for_role("Angela Merkel", Some("System"))));
+    }
+
+    #[test]
+    fn scan_for_role_unknown_role_still_scans() {
+        // Safety: a missing/None role must never silently drop NER.
+        let engine = engine_with_fake_ner(Some(vec!["user"]));
+        assert!(has_person(&engine.scan_for_role("Angela Merkel", None)));
+    }
+
+    #[test]
+    fn scan_for_role_keeps_regex_on_excluded_role() {
+        // Regex recognizers always run, even on a role NER is scoped out of.
+        let engine = engine_with_fake_ner(Some(vec!["user"]));
+        let dets = engine.scan_for_role("mail alice@example.com", Some("system"));
+        assert!(
+            dets.iter().any(|d| d.kind == EntityKind::Email),
+            "email regex must still fire on the system role"
+        );
+        assert!(
+            !has_person(&dets),
+            "but NER (person) must be scoped out on the system role"
+        );
+    }
+
+    #[test]
+    fn try_scan_for_role_scopes_ner() {
+        let engine = engine_with_fake_ner(Some(vec!["user"]));
+        let user = engine.try_scan_for_role("Angela Merkel", Some("user")).unwrap();
+        assert!(has_person(&user));
+        let sys = engine
+            .try_scan_for_role("Angela Merkel", Some("system"))
+            .unwrap();
+        assert!(!has_person(&sys));
     }
 }

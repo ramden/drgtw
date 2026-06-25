@@ -190,9 +190,26 @@ fn push_content_text(content: Option<&serde_json::Value>, out: &mut String) {
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
+/// Extract a message's `role` as an owned lowercase-preserving string. Returned
+/// owned so the caller can immutably read the role before taking a mutable
+/// borrow of the message's `content`. `None` when absent or non-string.
+fn message_role(msg: &serde_json::Value) -> Option<String> {
+    msg.get("role")
+        .and_then(|r| r.as_str())
+        .map(str::to_owned)
+}
+
 /// Scan `text` with the engine (infallible) and pseudonymize it via the map.
-fn scan_and_rewrite(text: &str, engine: &PiiEngine, map: &mut EntityMap) -> String {
-    let detections = engine.scan(text);
+///
+/// `role` is the chat message role this text came from; it scopes the NER
+/// recognizer via `pii.ner.scan_roles` (regex recognizers always run).
+fn scan_and_rewrite(
+    text: &str,
+    engine: &PiiEngine,
+    map: &mut EntityMap,
+    role: Option<&str>,
+) -> String {
+    let detections = engine.scan_for_role(text, role);
     map.pseudonymize(text, &detections)
 }
 
@@ -205,15 +222,21 @@ fn try_scan_and_rewrite(
     text: &str,
     engine: &PiiEngine,
     map: &mut EntityMap,
+    role: Option<&str>,
 ) -> Result<String, DetectError> {
-    let detections = engine.try_scan(text)?;
+    let detections = engine.try_scan_for_role(text, role)?;
     map.try_pseudonymize(text, &detections)
 }
 
 /// If `value` is a JSON string, scan+rewrite it in place.
-fn rewrite_string_value(value: &mut serde_json::Value, engine: &PiiEngine, map: &mut EntityMap) {
+fn rewrite_string_value(
+    value: &mut serde_json::Value,
+    engine: &PiiEngine,
+    map: &mut EntityMap,
+    role: Option<&str>,
+) {
     if let Some(s) = value.as_str() {
-        let rewritten = scan_and_rewrite(s, engine, map);
+        let rewritten = scan_and_rewrite(s, engine, map, role);
         *value = serde_json::Value::String(rewritten);
     }
 }
@@ -223,9 +246,10 @@ fn try_rewrite_string_value(
     value: &mut serde_json::Value,
     engine: &PiiEngine,
     map: &mut EntityMap,
+    role: Option<&str>,
 ) -> Result<(), DetectError> {
     if let Some(s) = value.as_str() {
-        let rewritten = try_scan_and_rewrite(s, engine, map)?;
+        let rewritten = try_scan_and_rewrite(s, engine, map, role)?;
         *value = serde_json::Value::String(rewritten);
     }
     Ok(())
@@ -293,7 +317,8 @@ fn pseudonymize_openai_request(
         return;
     };
     for msg in messages {
-        rewrite_openai_content(msg.get_mut("content"), engine, map);
+        let role = message_role(msg);
+        rewrite_openai_content(msg.get_mut("content"), engine, map, role.as_deref());
     }
 }
 
@@ -302,17 +327,18 @@ fn rewrite_openai_content(
     content: Option<&mut serde_json::Value>,
     engine: &PiiEngine,
     map: &mut EntityMap,
+    role: Option<&str>,
 ) {
     let Some(content) = content else { return };
 
     if content.is_string() {
-        rewrite_string_value(content, engine, map);
+        rewrite_string_value(content, engine, map, role);
     } else if let Some(parts) = content.as_array_mut() {
         for part in parts {
             if part.get("type").and_then(|t| t.as_str()) == Some("text")
                 && let Some(text_field) = part.get_mut("text")
             {
-                rewrite_string_value(text_field, engine, map);
+                rewrite_string_value(text_field, engine, map, role);
             }
             // Other part types (image_url, etc.) are left untouched.
         }
@@ -328,17 +354,18 @@ fn pseudonymize_anthropic_request(
     engine: &PiiEngine,
     map: &mut EntityMap,
 ) {
-    // system: string or array of text blocks
+    // system: string or array of text blocks. Role is "system" for scoping.
     if let Some(system) = body.get_mut("system") {
-        rewrite_anthropic_text_field(system, engine, map);
+        rewrite_anthropic_text_field(system, engine, map, Some("system"));
     }
 
     let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) else {
         return;
     };
     for msg in messages {
+        let role = message_role(msg);
         if let Some(content) = msg.get_mut("content") {
-            rewrite_anthropic_content(content, engine, map);
+            rewrite_anthropic_content(content, engine, map, role.as_deref());
         }
     }
 }
@@ -348,15 +375,16 @@ fn rewrite_anthropic_text_field(
     value: &mut serde_json::Value,
     engine: &PiiEngine,
     map: &mut EntityMap,
+    role: Option<&str>,
 ) {
     if value.is_string() {
-        rewrite_string_value(value, engine, map);
+        rewrite_string_value(value, engine, map, role);
     } else if let Some(blocks) = value.as_array_mut() {
         for block in blocks {
             if block.get("type").and_then(|t| t.as_str()) == Some("text")
                 && let Some(text_field) = block.get_mut("text")
             {
-                rewrite_string_value(text_field, engine, map);
+                rewrite_string_value(text_field, engine, map, role);
             }
         }
     }
@@ -368,9 +396,10 @@ fn rewrite_anthropic_content(
     content: &mut serde_json::Value,
     engine: &PiiEngine,
     map: &mut EntityMap,
+    role: Option<&str>,
 ) {
     if content.is_string() {
-        rewrite_string_value(content, engine, map);
+        rewrite_string_value(content, engine, map, role);
         return;
     }
     let Some(blocks) = content.as_array_mut() else {
@@ -384,13 +413,13 @@ fn rewrite_anthropic_content(
         match block_type.as_deref() {
             Some("text") => {
                 if let Some(text_field) = block.get_mut("text") {
-                    rewrite_string_value(text_field, engine, map);
+                    rewrite_string_value(text_field, engine, map, role);
                 }
             }
             Some("tool_result") => {
                 // tool_result.content: string or array of text blocks
                 if let Some(inner) = block.get_mut("content") {
-                    rewrite_anthropic_text_field(inner, engine, map);
+                    rewrite_anthropic_text_field(inner, engine, map, role);
                 }
             }
             _ => {
@@ -411,7 +440,8 @@ fn try_pseudonymize_openai_request(
         return Ok(());
     };
     for msg in messages {
-        try_rewrite_openai_content(msg.get_mut("content"), engine, map)?;
+        let role = message_role(msg);
+        try_rewrite_openai_content(msg.get_mut("content"), engine, map, role.as_deref())?;
     }
     Ok(())
 }
@@ -420,18 +450,19 @@ fn try_rewrite_openai_content(
     content: Option<&mut serde_json::Value>,
     engine: &PiiEngine,
     map: &mut EntityMap,
+    role: Option<&str>,
 ) -> Result<(), DetectError> {
     let Some(content) = content else {
         return Ok(());
     };
     if content.is_string() {
-        try_rewrite_string_value(content, engine, map)?;
+        try_rewrite_string_value(content, engine, map, role)?;
     } else if let Some(parts) = content.as_array_mut() {
         for part in parts {
             if part.get("type").and_then(|t| t.as_str()) == Some("text")
                 && let Some(text_field) = part.get_mut("text")
             {
-                try_rewrite_string_value(text_field, engine, map)?;
+                try_rewrite_string_value(text_field, engine, map, role)?;
             }
         }
     }
@@ -446,14 +477,15 @@ fn try_pseudonymize_anthropic_request(
     map: &mut EntityMap,
 ) -> Result<(), DetectError> {
     if let Some(system) = body.get_mut("system") {
-        try_rewrite_anthropic_text_field(system, engine, map)?;
+        try_rewrite_anthropic_text_field(system, engine, map, Some("system"))?;
     }
     let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) else {
         return Ok(());
     };
     for msg in messages {
+        let role = message_role(msg);
         if let Some(content) = msg.get_mut("content") {
-            try_rewrite_anthropic_content(content, engine, map)?;
+            try_rewrite_anthropic_content(content, engine, map, role.as_deref())?;
         }
     }
     Ok(())
@@ -463,15 +495,16 @@ fn try_rewrite_anthropic_text_field(
     value: &mut serde_json::Value,
     engine: &PiiEngine,
     map: &mut EntityMap,
+    role: Option<&str>,
 ) -> Result<(), DetectError> {
     if value.is_string() {
-        try_rewrite_string_value(value, engine, map)?;
+        try_rewrite_string_value(value, engine, map, role)?;
     } else if let Some(blocks) = value.as_array_mut() {
         for block in blocks {
             if block.get("type").and_then(|t| t.as_str()) == Some("text")
                 && let Some(text_field) = block.get_mut("text")
             {
-                try_rewrite_string_value(text_field, engine, map)?;
+                try_rewrite_string_value(text_field, engine, map, role)?;
             }
         }
     }
@@ -482,9 +515,10 @@ fn try_rewrite_anthropic_content(
     content: &mut serde_json::Value,
     engine: &PiiEngine,
     map: &mut EntityMap,
+    role: Option<&str>,
 ) -> Result<(), DetectError> {
     if content.is_string() {
-        try_rewrite_string_value(content, engine, map)?;
+        try_rewrite_string_value(content, engine, map, role)?;
         return Ok(());
     }
     let Some(blocks) = content.as_array_mut() else {
@@ -498,12 +532,12 @@ fn try_rewrite_anthropic_content(
         match block_type.as_deref() {
             Some("text") => {
                 if let Some(text_field) = block.get_mut("text") {
-                    try_rewrite_string_value(text_field, engine, map)?;
+                    try_rewrite_string_value(text_field, engine, map, role)?;
                 }
             }
             Some("tool_result") => {
                 if let Some(inner) = block.get_mut("content") {
-                    try_rewrite_anthropic_text_field(inner, engine, map)?;
+                    try_rewrite_anthropic_text_field(inner, engine, map, role)?;
                 }
             }
             _ => {}
@@ -1285,5 +1319,97 @@ mod tests {
         let ph0 = body["messages"][0]["content"].as_str().unwrap().to_owned();
         let ph1 = body["messages"][1]["content"].as_str().unwrap().to_owned();
         assert!(ph1.contains(&ph0.trim().to_owned()));
+    }
+
+    // ── NER scan-role scoping wired through the body walker (R1) ───────────
+
+    /// Fake NER recognizer: named `"ner"`, masks the literal "Angela Merkel"
+    /// wherever it appears. Lets us assert role scoping without a model.
+    struct FakeNer;
+    impl crate::Recognizer for FakeNer {
+        fn name(&self) -> &str {
+            "ner"
+        }
+        fn detect(&self, text: &str) -> Vec<Detection> {
+            match text.find("Angela Merkel") {
+                Some(start) => vec![Detection {
+                    start,
+                    end: start + "Angela Merkel".len(),
+                    kind: EntityKind::Person,
+                }],
+                None => vec![],
+            }
+        }
+    }
+
+    fn engine_scoped_to(roles: &[&str]) -> PiiEngine {
+        use drgtw_config::{FailMode, NerConfig, PiiConfig};
+        let cfg = PiiConfig {
+            ner: Some(NerConfig {
+                model_dir: "models/ner".to_string(),
+                score_threshold: 0.5,
+                fail_mode: FailMode::Open,
+                timeout_ms: 5000,
+                workers: 2,
+                queue_capacity: 64,
+                scan_roles: Some(roles.iter().map(|s| s.to_string()).collect()),
+                cache_capacity: 0,
+            }),
+            ..PiiConfig::default()
+        };
+        let mut engine = PiiEngine::from_config(&cfg).unwrap();
+        engine.push_recognizer(Box::new(FakeNer));
+        engine
+    }
+
+    #[test]
+    fn openai_scan_roles_skips_ner_on_system_message() {
+        let engine = engine_scoped_to(&["user", "assistant"]);
+        let mut map = EntityMap::new();
+        let mut body = json!({
+            "messages": [
+                {"role": "system", "content": "You assist Angela Merkel's office"},
+                {"role": "user", "content": "Tell Angela Merkel hi"}
+            ]
+        });
+        pseudonymize_body(BodyFormat::OpenAiChat, &mut body, &engine, &mut map);
+        // System message: NER scoped out → name passes through.
+        assert!(
+            body["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("Angela Merkel"),
+            "system role should NOT be NER-masked"
+        );
+        // User message: NER runs → name masked.
+        assert!(
+            !body["messages"][1]["content"]
+                .as_str()
+                .unwrap()
+                .contains("Angela Merkel"),
+            "user role SHOULD be NER-masked"
+        );
+    }
+
+    #[test]
+    fn anthropic_scan_roles_skips_ner_on_system_field() {
+        let engine = engine_scoped_to(&["user"]);
+        let mut map = EntityMap::new();
+        let mut body = json!({
+            "system": "Briefing for Angela Merkel",
+            "messages": [{"role": "user", "content": "Page Angela Merkel"}]
+        });
+        pseudonymize_body(BodyFormat::AnthropicMessages, &mut body, &engine, &mut map);
+        assert!(
+            body["system"].as_str().unwrap().contains("Angela Merkel"),
+            "Anthropic system field should NOT be NER-masked"
+        );
+        assert!(
+            !body["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("Angela Merkel"),
+            "user message SHOULD be NER-masked"
+        );
     }
 }

@@ -3,6 +3,24 @@
 All notable changes to drgtw are documented here. The format is loosely based
 on [Keep a Changelog](https://keepachangelog.com/); versions are pre-1.0 alpha.
 
+## [0.0.9-alpha] — 2026-06-25
+
+### Added — NER performance
+- **`pii.ner.scan_roles`**: restrict the NER model to specific chat message
+  roles (e.g. `["user", "assistant"]`), matched case-insensitively against the
+  message `role` (the Anthropic top-level `system` field counts as `system`).
+  Lets deployments skip NER on a large, static, PII-free system prompt. The
+  regex recognizers (email/phone/IBAN/card/IP/date) still scan **every** role —
+  only the NER model is scoped, so structured-identifier masking is unchanged.
+  Absent = all roles (backward compatible); an empty list is rejected; a
+  missing/unknown role is always scanned.
+- **`pii.ner.cache_capacity`**: in-memory LRU cache of NER verdicts keyed on a
+  128-bit hash of the input text. `0` (default) disables it; `> 0` reuses
+  results for byte-identical text across requests. No plaintext is stored (only
+  span offsets/kinds/scores), and only successful inferences are cached so a
+  timeout/queue-full error cannot poison later requests. Composes with
+  `scan_roles`.
+
 ## [0.0.8-alpha] — unreleased
 
 ### Added — PII entity coverage

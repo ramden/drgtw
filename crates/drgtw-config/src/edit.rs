@@ -475,6 +475,8 @@ fn ner_config_eq(a: &Option<crate::NerConfig>, b: &Option<crate::NerConfig>) -> 
                 && an.timeout_ms == bn.timeout_ms
                 && an.workers == bn.workers
                 && an.queue_capacity == bn.queue_capacity
+                && an.scan_roles == bn.scan_roles
+                && an.cache_capacity == bn.cache_capacity
         }
         _ => false,
     }
@@ -793,6 +795,20 @@ pub(crate) fn validate_inner(config: &Config, ui_mode: bool) -> Result<(), Confi
             return Err(ConfigError::Invalid(
                 "pii.ner.queue_capacity must be > 0".to_owned(),
             ));
+        }
+        if let Some(roles) = &ner.scan_roles {
+            if roles.is_empty() {
+                return Err(ConfigError::Invalid(
+                    "pii.ner.scan_roles must not be an empty list — omit it to scan all \
+                     roles, or list the roles to scan (e.g. [\"user\", \"assistant\"])"
+                        .to_owned(),
+                ));
+            }
+            if roles.iter().any(|r| r.trim().is_empty()) {
+                return Err(ConfigError::Invalid(
+                    "pii.ner.scan_roles entries must not be blank".to_owned(),
+                ));
+            }
         }
     }
 

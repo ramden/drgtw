@@ -308,3 +308,12 @@ enabled_by_default = true
 # workers = 2
 # Max pending requests in the NER queue.  Must be > 0.
 # queue_capacity = 64
+# Restrict the NER model to these message roles ("system", "user", "assistant",
+# "developer", "tool"; case-insensitive).  Omit = scan all roles.  Regex
+# recognizers (email/phone/IBAN/...) always scan every role regardless.  Use this
+# to skip NER on a large, static, PII-free system prompt.  Empty list rejected.
+# scan_roles = ["user", "assistant"]
+# In-memory NER verdict cache size, in distinct input texts.  0 = disabled.
+# When > 0, results for byte-identical text are reused across requests (LRU).
+# The key is a 128-bit hash; no plaintext is stored — only span offsets/scores.
+# cache_capacity = 1024

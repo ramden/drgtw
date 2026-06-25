@@ -157,6 +157,34 @@ Optional. Named-entity recognition for `PERSON` / `ORGANIZATION` / `LOCATION` (a
 | `timeout_ms` | int | no | `5000` | Per-inference deadline in milliseconds. Must be `> 0`. |
 | `workers` | int | no | `2` | NER worker threads. Must be `> 0`. |
 | `queue_capacity` | int | no | `64` | Max queued inference jobs before backpressure. Must be `> 0`. |
+| `scan_roles` | array of string | no | — (all roles) | Restrict the NER model to chat messages of these roles (`"system"`, `"user"`, `"assistant"`, `"developer"`, `"tool"`; matched case-insensitively). The Anthropic top-level `system` field counts as role `system`. When omitted, NER runs on every role. **Regex recognizers (email, phone, IBAN, …) always run on every role regardless of this setting** — only the NER model is scoped. An empty list is rejected. |
+| `cache_capacity` | int | no | `0` (disabled) | Size of the in-memory NER verdict cache, in distinct input texts. When `> 0`, NER results for byte-identical text are reused across requests with LRU eviction. The key is a 128-bit hash of the input — **no plaintext is stored**, only span offsets/kinds/scores. |
+
+#### Scoping NER by message role (`scan_roles`)
+
+In multi-agent stacks every user turn fans out into many gateway calls, and each call typically repeats a large, static, developer-authored system prompt. NER inference is the dominant cost of a PII scan, so re-running it on an unchanged, PII-free system prompt on every call wastes time and can trigger timeouts.
+
+`scan_roles` lets you skip the NER model on roles you control and know to be PII-free:
+
+```toml
+[pii.ner]
+model_dir  = "models/ner-multilingual"
+scan_roles = ["user", "assistant"]   # NER skips the system prompt
+```
+
+This keeps full structured-identifier masking (the cheap regex recognizers still scan every role, including `system`), so compliance for emails/IBANs/cards is unaffected — only the expensive person/org/location model is scoped out.
+
+#### Caching NER verdicts (`cache_capacity`)
+
+For large repeated content — an unchanged system prompt, or a long conversation prefix re-sent across multi-round calls — `cache_capacity` reuses prior NER verdicts instead of re-running inference:
+
+```toml
+[pii.ner]
+model_dir      = "models/ner-multilingual"
+cache_capacity = 1024                # reuse verdicts for repeated text
+```
+
+The cache is keyed on a 128-bit hash of the input text; it stores only detected span offsets/kinds/scores, never the text itself. Only successful inferences are cached — a timeout or full-queue error is never cached, so a transient failure cannot poison later requests. `scan_roles` and `cache_capacity` are independent and compose: scope NER off the system prompt *and* cache the verdicts for any other repeated content.
 
 #### Model packaging
 
