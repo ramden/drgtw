@@ -82,10 +82,15 @@ impl NerModel {
             .ok_or_else(|| load_err(&tokenizer_path, "tokenizer has no [SEP] token".to_string()))?;
 
         // 4. Build session. intra_threads(1): parallelism comes from the pool.
+        // allow_spinning=0: ORT thread pools busy-wait (spin) on the work queue
+        // between inferences by default, pinning ~1 core at 100% even when idle.
+        // Disable so worker threads sleep when there is no traffic.
         let build_session = || -> ort::Result<Session> {
             Session::builder()?
                 .with_optimization_level(GraphOptimizationLevel::Level3)?
                 .with_intra_threads(1)?
+                .with_config_entry("session.intra_op.allow_spinning", "0")?
+                .with_config_entry("session.inter_op.allow_spinning", "0")?
                 .commit_from_file(&onnx_path)
         };
         let session = build_session()
