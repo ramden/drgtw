@@ -62,6 +62,7 @@ fn chat_config(mock_base_url: &str) -> Arc<Config> {
             rate_limit: None,
             budget: None,
             mcp_servers: None,
+            allow_pii_bypass: false,
         }],
         pii: PiiConfig::default(),
         events: None,

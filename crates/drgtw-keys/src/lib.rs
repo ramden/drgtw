@@ -513,6 +513,8 @@ struct KeyEntry {
     model_allowlist: Option<Vec<String>>,
     /// Resolved MCP server allowlist: empty = all servers allowed.
     mcp_servers: Vec<String>,
+    /// Whether this key may bypass PII scanning via the `x-drgtw-pii: off` header.
+    allow_pii_bypass: bool,
 }
 
 impl std::fmt::Debug for KeyStore {
@@ -540,6 +542,9 @@ pub struct ResolvedKey {
     /// Resolved MCP server allowlist. Empty vec = all configured servers allowed.
     /// Populated from `VirtualKey.mcp_servers`; `None` in config maps to `vec![]`.
     pub mcp_servers: Vec<String>,
+    /// Whether this key is authorized to bypass PII scanning per request via the
+    /// `x-drgtw-pii: off` header. Unauthorized keys' bypass headers are ignored.
+    pub allow_pii_bypass: bool,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -602,6 +607,7 @@ impl KeyStore {
                     connections,
                     model_allowlist: vk.models.clone(),
                     mcp_servers: vk.mcp_servers.clone().unwrap_or_default(),
+                    allow_pii_bypass: vk.allow_pii_bypass,
                 }
             })
             .collect();
@@ -701,6 +707,7 @@ impl KeyStore {
             connections: entry.connections.clone(),
             model_allowlist: entry.model_allowlist.clone(),
             mcp_servers: entry.mcp_servers.clone(),
+            allow_pii_bypass: entry.allow_pii_bypass,
         })
     }
 }
@@ -896,6 +903,7 @@ mod tests {
             rate_limit: None,
             budget: None,
             mcp_servers: None,
+            allow_pii_bypass: false,
         }
     }
 
@@ -916,6 +924,7 @@ mod tests {
             }),
             budget: None,
             mcp_servers: None,
+            allow_pii_bypass: false,
         }
     }
 
@@ -935,6 +944,7 @@ mod tests {
                 per_seconds,
             }),
             mcp_servers: None,
+            allow_pii_bypass: false,
         }
     }
 
@@ -1308,6 +1318,28 @@ mod tests {
 
     fn get_rk(cfg: &Config, key: &str) -> ResolvedKey {
         KeyStore::new(cfg).authenticate(&bearer(key)).unwrap()
+    }
+
+    #[test]
+    fn test_resolved_key_carries_allow_pii_bypass() {
+        let mut vk_bypass = make_virtual_key("sk-drgtw-bypass", &["openai"], None);
+        vk_bypass.allow_pii_bypass = true;
+        let vk_normal = make_virtual_key("sk-drgtw-normal", &["openai"], None);
+        let cfg = Config {
+            connections: vec![make_connection("openai", &["gpt-4o"])],
+            virtual_keys: vec![vk_bypass, vk_normal],
+            pii: PiiConfig::default(),
+            ..Config::default()
+        };
+        let store = KeyStore::new(&cfg);
+        assert!(
+            store.authenticate(&bearer("sk-drgtw-bypass")).unwrap().allow_pii_bypass,
+            "key configured allow_pii_bypass=true must resolve to true"
+        );
+        assert!(
+            !store.authenticate(&bearer("sk-drgtw-normal")).unwrap().allow_pii_bypass,
+            "key without the flag must resolve to false (fail-closed)"
+        );
     }
 
     #[test]

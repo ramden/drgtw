@@ -59,6 +59,9 @@ fn openai_pii_config(mock_base_url: &str, pii_enabled: bool) -> Arc<Config> {
             rate_limit: None,
             budget: None,
             mcp_servers: None,
+            // Authorized to bypass PII so the `x-drgtw-pii: off` passthrough
+            // test exercises an allowed key (the gate is unit-tested separately).
+            allow_pii_bypass: true,
         }],
         pii: PiiConfig {
             enabled_by_default: pii_enabled,
@@ -104,6 +107,7 @@ fn anthropic_pii_config(mock_base_url: &str, pii_enabled: bool) -> Arc<Config> {
             rate_limit: None,
             budget: None,
             mcp_servers: None,
+            allow_pii_bypass: false,
         }],
         pii: PiiConfig {
             enabled_by_default: pii_enabled,

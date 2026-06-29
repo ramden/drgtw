@@ -61,6 +61,7 @@ fn make_config(upstream_base: &str, events: Option<EventsConfig>) -> Arc<Config>
             rate_limit: None,
             budget: None,
             mcp_servers: None,
+            allow_pii_bypass: false,
         }],
         pii: PiiConfig { enabled_by_default: false, ..Default::default() },
         events,

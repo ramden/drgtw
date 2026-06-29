@@ -62,6 +62,7 @@ Array of credentials issued to downstream callers. Callers supply these as Beare
 | `key` | string | yes | — | The key value. Must start with `sk-drgtw-`. Must be unique across all virtual keys. |
 | `connections` | array of strings | yes | — | One or more connection `name` values this key may route to. Must be non-empty; all names must resolve to a defined connection. |
 | `models` | array of strings | no | `null` (all) | Optional model allowlist. When omitted, all models of the listed connections are permitted. When present, requests for any other model are rejected with 403. |
+| `allow_pii_bypass` | bool | no | `false` | When `true`, this key may disable PII scanning per request via `x-drgtw-pii: off`. Keys without it have the bypass header ignored (fail-closed — PII still scans). See [PII → Per-request PII bypass](pii.md#per-request-pii-bypass-x-drgtw-pii). |
 
 ---
 

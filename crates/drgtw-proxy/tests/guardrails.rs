@@ -49,6 +49,7 @@ fn base_config(upstream: &str, guardrails: GuardrailsConfig) -> Arc<Config> {
             rate_limit: None,
             budget: None,
             mcp_servers: None,
+            allow_pii_bypass: false,
         }],
         // PII off → isolate guardrail behaviour.
         pii: PiiConfig {

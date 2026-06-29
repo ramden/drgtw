@@ -146,6 +146,7 @@ async fn event_sink_adds_signature_header_when_secret_set() {
             rate_limit: None,
             budget: None,
             mcp_servers: None,
+            allow_pii_bypass: false,
         }],
         pii: PiiConfig::default(),
         events: Some(EventsConfig {
@@ -224,6 +225,7 @@ async fn event_sink_no_signature_header_when_secret_absent() {
             rate_limit: None,
             budget: None,
             mcp_servers: None,
+            allow_pii_bypass: false,
         }],
         pii: PiiConfig::default(),
         events: Some(EventsConfig {
@@ -311,6 +313,7 @@ async fn pii_request_sets_pii_flag_in_usage_event() {
             rate_limit: None,
             budget: None,
             mcp_servers: None,
+            allow_pii_bypass: false,
         }],
         pii: PiiConfig {
             enabled_by_default: true,
@@ -382,6 +385,7 @@ async fn non_pii_request_pii_flag_false() {
             rate_limit: None,
             budget: None,
             mcp_servers: None,
+            allow_pii_bypass: false,
         }],
         pii: PiiConfig {
             enabled_by_default: true,

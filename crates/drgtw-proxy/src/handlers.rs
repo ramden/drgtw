@@ -102,16 +102,35 @@ fn resolve_debug(headers: &HeaderMap) -> bool {
 
 /// Resolve PII mode from the `x-drgtw-pii` request header and the config
 /// default.
+///
+/// `x-drgtw-pii: off` disables PII scanning for this request, but only when the
+/// authenticated key is authorized (`allow_pii_bypass = true`). An unauthorized
+/// key's `off` header is ignored — the request falls back to the config default
+/// (fail-closed: PII still scans when enabled by default). `on` is never gated:
+/// opting *into* scanning is always allowed.
 fn resolve_pii_mode(
     headers: &HeaderMap,
     enabled_by_default: bool,
+    allow_pii_bypass: bool,
     error_fmt: ErrorFormat,
 ) -> Result<PiiMode, ProxyError> {
+    let default_mode = if enabled_by_default { PiiMode::On } else { PiiMode::Off };
     match headers.get("x-drgtw-pii") {
-        None => Ok(if enabled_by_default { PiiMode::On } else { PiiMode::Off }),
+        None => Ok(default_mode),
         Some(v) => match v.to_str().unwrap_or("").to_ascii_lowercase().as_str() {
             "on" => Ok(PiiMode::On),
-            "off" => Ok(PiiMode::Off),
+            "off" => {
+                if allow_pii_bypass {
+                    Ok(PiiMode::Off)
+                } else {
+                    // Unauthorized bypass attempt: ignore the header, keep the
+                    // config default. Fail-closed — the key may not disable PII.
+                    tracing::debug!(
+                        "x-drgtw-pii: off ignored: key not authorized for PII bypass"
+                    );
+                    Ok(default_mode)
+                }
+            }
             _ => Err(ProxyError::InvalidPiiHeader { fmt: error_fmt }),
         },
     }
@@ -351,10 +370,12 @@ async fn proxy_endpoint(
         return Err(ProxyError::BudgetExhausted { max_usd, retry_after_secs });
     }
 
-    // 4. Resolve PII mode (WP 3.4).
+    // 4. Resolve PII mode (WP 3.4). The bypass header is honored only for keys
+    //    flagged `allow_pii_bypass` (fail-closed).
     let pii_mode = resolve_pii_mode(
         &parts.headers,
         live.config.pii.enabled_by_default,
+        resolved.allow_pii_bypass,
         spec.error_fmt,
     )?;
 
@@ -1700,10 +1721,11 @@ async fn embeddings_inner(
         return Err(ProxyError::BudgetExhausted { max_usd, retry_after_secs });
     }
 
-    // 4. PII mode.
+    // 4. PII mode. Bypass header honored only for `allow_pii_bypass` keys.
     let pii_mode = resolve_pii_mode(
         &parts.headers,
         live.config.pii.enabled_by_default,
+        resolved.allow_pii_bypass,
         ErrorFormat::OpenAi,
     )?;
 
@@ -2062,6 +2084,74 @@ mod tests {
         let dets = engine.try_scan(text).expect("scan");
         map.try_pseudonymize(text, &dets).expect("pseudonymize");
         map
+    }
+
+    // --- resolve_pii_mode: per-key bypass gate (fail-closed) ---
+
+    fn pii_hdr(val: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("x-drgtw-pii", HeaderValue::from_str(val).unwrap());
+        h
+    }
+
+    #[test]
+    fn pii_mode_no_header_uses_config_default() {
+        let empty = HeaderMap::new();
+        assert_eq!(
+            resolve_pii_mode(&empty, true, false, ErrorFormat::OpenAi).unwrap(),
+            PiiMode::On
+        );
+        assert_eq!(
+            resolve_pii_mode(&empty, false, false, ErrorFormat::OpenAi).unwrap(),
+            PiiMode::Off
+        );
+    }
+
+    #[test]
+    fn pii_mode_on_header_never_gated() {
+        // Opting INTO scanning is always allowed, regardless of the bypass flag.
+        let h = pii_hdr("on");
+        assert_eq!(resolve_pii_mode(&h, false, false, ErrorFormat::OpenAi).unwrap(), PiiMode::On);
+        assert_eq!(resolve_pii_mode(&h, false, true, ErrorFormat::OpenAi).unwrap(), PiiMode::On);
+    }
+
+    #[test]
+    fn pii_mode_off_honored_only_when_authorized() {
+        let h = pii_hdr("off");
+        assert_eq!(
+            resolve_pii_mode(&h, true, true, ErrorFormat::OpenAi).unwrap(),
+            PiiMode::Off,
+            "authorized key (allow_pii_bypass=true) may disable PII"
+        );
+    }
+
+    #[test]
+    fn pii_mode_off_ignored_when_unauthorized_fail_closed() {
+        // Unauthorized key sends `off` → header ignored, falls back to default.
+        let h = pii_hdr("off");
+        assert_eq!(
+            resolve_pii_mode(&h, true, false, ErrorFormat::OpenAi).unwrap(),
+            PiiMode::On,
+            "fail-closed: PII still scans for a key not allowed to bypass"
+        );
+        // Default-off: result is off via config, not via the (ignored) header.
+        assert_eq!(
+            resolve_pii_mode(&h, false, false, ErrorFormat::OpenAi).unwrap(),
+            PiiMode::Off
+        );
+    }
+
+    #[test]
+    fn pii_mode_off_case_insensitive() {
+        assert_eq!(
+            resolve_pii_mode(&pii_hdr("OFF"), true, true, ErrorFormat::OpenAi).unwrap(),
+            PiiMode::Off
+        );
+    }
+
+    #[test]
+    fn pii_mode_invalid_header_errors() {
+        assert!(resolve_pii_mode(&pii_hdr("maybe"), true, true, ErrorFormat::OpenAi).is_err());
     }
 
     #[test]

@@ -85,6 +85,7 @@ fn openai_config(
             rate_limit: None,
             budget: None,
             mcp_servers: None,
+            allow_pii_bypass: false,
         }],
         pii: PiiConfig {
             enabled_by_default: pii_enabled,

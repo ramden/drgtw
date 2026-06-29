@@ -120,6 +120,7 @@ fn base_config(mcp_servers: HashMap<String, McpServerConfig>) -> Arc<Config> {
             rate_limit: None,
             budget: None,
             mcp_servers: None,
+            allow_pii_bypass: false,
         }],
         pii: PiiConfig::default(),
         events: None,

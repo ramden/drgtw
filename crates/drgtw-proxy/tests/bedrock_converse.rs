@@ -114,6 +114,7 @@ fn base_config(connection: Connection, virtual_key: &str, sink: &MockServer, pii
             rate_limit: None,
             budget: None,
             mcp_servers: None,
+            allow_pii_bypass: false,
         }],
         pii,
         events: Some(events_config(format!("{}/events", sink.uri()))),

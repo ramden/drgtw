@@ -126,7 +126,7 @@ a jailbreak guardrail.
 
 ```toml
 [pii]
-enabled_by_default = true          # mask every request unless caller sends x-drgtw-pii: off
+enabled_by_default = true          # mask every request unless an authorized caller sends x-drgtw-pii: off
 require_ner        = true          # refuse to boot if NER is missing/misconfigured
 entities = ["PERSON", "ORG", "LOCATION", "EMAIL", "PHONE", "IBAN", "CREDIT_CARD"]
 
@@ -162,6 +162,39 @@ failures. `require_ner` catches *"I forgot the `[pii.ner]` block."*
 `--strict-config` catches *"I wrote `[ner]` instead of `[pii.ner]`"* — a block that
 **looks** present but never binds. Together they make "names silently unmasked"
 impossible to ship.
+
+---
+
+## Per-request PII bypass (`x-drgtw-pii`)
+
+Callers can override the PII mode per request with the `x-drgtw-pii` header:
+
+| Header | Effect |
+|---|---|
+| `x-drgtw-pii: on`  | Force PII scanning on for this request (always allowed). |
+| `x-drgtw-pii: off` | Skip PII scanning for this request — **only for authorized keys**. |
+| *(absent)*         | Use `pii.enabled_by_default`. |
+
+`off` is **gated per virtual key** and **fail-closed**: a key may disable scanning
+only when it is explicitly authorized. An `off` header from an unauthorized key is
+**ignored** — the request falls back to the config default (i.e. PII still scans
+when `enabled_by_default = true`). This prevents any holder of a valid key from
+silently turning masking off.
+
+Authorize a key with `allow_pii_bypass` (defaults to `false`):
+
+```toml
+[[virtual_keys]]
+key              = "sk-analyzer"
+connections      = ["azure"]
+allow_pii_bypass = true   # only this key may honor `x-drgtw-pii: off`
+```
+
+This lets one key mix scanned and unscanned traffic, decided per call. The common
+case: a code/embedding-analysis job sends `x-drgtw-pii: off` on its
+`/v1/embeddings` calls — masking would mutate the input text and skew the vectors —
+while the same deployment's chat traffic stays scanned. An unauthorized key sending
+the same header is silently scanned anyway.
 
 ---
 

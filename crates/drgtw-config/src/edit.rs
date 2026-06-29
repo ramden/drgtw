@@ -442,6 +442,7 @@ fn configs_virtual_keys_eq(a: &Config, b: &Config) -> bool {
             && av.models == bv.models
             && av.rate_limit == bv.rate_limit
             && av.budget == bv.budget
+            && av.allow_pii_bypass == bv.allow_pii_bypass
     })
 }
 

@@ -187,6 +187,11 @@ pub struct VirtualKey {
     /// Each entry must name a key in `config.mcp_servers`; validated at load time.
     #[serde(default)]
     pub mcp_servers: Option<Vec<String>>,
+    /// When true, this key may bypass PII scanning per request by sending
+    /// `x-drgtw-pii: off`. Keys without this flag have the bypass header
+    /// ignored (fail-closed: PII still scans). Defaults to `false`.
+    #[serde(default)]
+    pub allow_pii_bypass: bool,
 }
 
 /// Per-virtual-key token-bucket rate limit configuration.
@@ -1385,6 +1390,47 @@ enabled_by_default = true
         unsafe {
             std::env::remove_var("DRGTW_TEST_HAPPY_KEY");
         }
+    }
+
+    #[test]
+    fn test_virtual_key_allow_pii_bypass_defaults_false() {
+        let toml = r#"
+[[connections]]
+name = "openai"
+base_url = "https://api.openai.com/v1"
+api_key = "literal-key-value"
+format = "open_ai"
+
+[[virtual_keys]]
+key = "sk-drgtw-nobypass"
+connections = ["openai"]
+"#;
+        let cfg = load_toml(toml).expect("should load");
+        assert!(
+            !cfg.virtual_keys[0].allow_pii_bypass,
+            "allow_pii_bypass must default to false (privacy-first)"
+        );
+    }
+
+    #[test]
+    fn test_virtual_key_allow_pii_bypass_parsed() {
+        let toml = r#"
+[[connections]]
+name = "openai"
+base_url = "https://api.openai.com/v1"
+api_key = "literal-key-value"
+format = "open_ai"
+
+[[virtual_keys]]
+key = "sk-drgtw-analyzer"
+connections = ["openai"]
+allow_pii_bypass = true
+"#;
+        let cfg = load_toml(toml).expect("should load");
+        assert!(
+            cfg.virtual_keys[0].allow_pii_bypass,
+            "allow_pii_bypass = true must parse"
+        );
     }
 
     #[test]
