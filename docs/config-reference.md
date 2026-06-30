@@ -368,6 +368,22 @@ Optional. OpenTelemetry OTLP export of traces and metrics. **Off by default** �
 | `export_interval_ms` | int | no | `10000` | Periodic metric push interval. |
 | `export_timeout_ms` | int | no | `5000` | Per-export deadline (trace batches and metric pushes). |
 | `metrics_include_key_id` | bool | no | `false` | Include `drgtw.key_id` as a **metric** label. Off by default because it multiplies metric cardinality (keys × models × connections × status). Spans always carry `key_id` — spans are not aggregated. |
+| `resource_attributes` | table | no | `{}` | Extra resource attributes merged into the exported `Resource`, alongside `service.name`/`service.version`. Use for vendor attributes — e.g. set `"openinference.project.name"` to route spans to a specific project in observability backends that key off it. |
+
+#### Resource attributes & project routing
+
+Some backends route spans by a resource attribute rather than `service.name`. For example, backends built on the OpenInference convention group traces by `openinference.project.name`; without it, every span lands in the backend's `default` project. Set it three ways (highest precedence last):
+
+1. **Config** — `[otel.resource_attributes]` table:
+   ```toml
+   [otel.resource_attributes]
+   "openinference.project.name" = "my-project"
+   ```
+2. **`OTEL_RESOURCE_ATTRIBUTES` env** — the standard OTLP form, comma-separated `key=value` pairs; overrides config per key:
+   ```
+   OTEL_RESOURCE_ATTRIBUTES=openinference.project.name=my-project,deployment.environment=prod
+   ```
+3. **`PHOENIX_PROJECT_NAME` env** — convenience that sets `openinference.project.name` only; overrides both of the above.
 
 ### Privacy allow-list
 

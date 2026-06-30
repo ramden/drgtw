@@ -8,7 +8,7 @@ pub use edit::{
     read_document, restart_required_changes, set_value, validate_str, write_safe, FieldError,
 };
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
 use std::path::Path;
 
@@ -730,6 +730,14 @@ pub struct OtelConfig {
     /// Spans always carry key_id (spans are not aggregated); this flag controls
     /// metrics only.
     pub metrics_include_key_id: bool,
+    /// Extra resource attributes merged into the exported OTLP `Resource`,
+    /// in addition to `service.name`/`service.version`. Use this to set
+    /// vendor attributes such as `openinference.project.name` (Phoenix routes
+    /// spans to a project via that key). At init these are overridden, per key,
+    /// by the standard `OTEL_RESOURCE_ATTRIBUTES` env (`k=v,k2=v2`); and
+    /// `PHOENIX_PROJECT_NAME`, if set, overrides `openinference.project.name`.
+    /// Default empty.
+    pub resource_attributes: BTreeMap<String, String>,
 }
 
 impl Default for OtelConfig {
@@ -745,6 +753,7 @@ impl Default for OtelConfig {
             export_interval_ms: default_otel_export_interval_ms(),
             export_timeout_ms: default_otel_export_timeout_ms(),
             metrics_include_key_id: false,
+            resource_attributes: BTreeMap::new(),
         }
     }
 }

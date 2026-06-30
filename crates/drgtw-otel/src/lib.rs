@@ -25,6 +25,7 @@
 //! returns `Ok(None)` when disabled — no provider installed, the gateway's
 //! stderr `fmt` subscriber and `[tracing]` JSONL writer are untouched.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use anyhow::Context as _;
@@ -409,14 +410,63 @@ impl OtelGuard {
     }
 }
 
+/// Phoenix (Arize) routes spans to a project via this resource attribute.
+/// Without it every span lands in Phoenix's `default` project.
+const PHOENIX_PROJECT_KEY: &str = "openinference.project.name";
+
 fn resource(cfg: &OtelConfig) -> Resource {
-    Resource::builder()
+    let attrs = merged_resource_attributes(
+        cfg,
+        std::env::var("OTEL_RESOURCE_ATTRIBUTES").ok(),
+        std::env::var("PHOENIX_PROJECT_NAME").ok(),
+    );
+    let mut builder = Resource::builder()
         .with_service_name(cfg.service_name.clone())
-        .with_attribute(KeyValue::new(
-            "service.version",
-            env!("CARGO_PKG_VERSION"),
-        ))
-        .build()
+        .with_attribute(KeyValue::new("service.version", env!("CARGO_PKG_VERSION")));
+    for (k, v) in attrs {
+        builder = builder.with_attribute(KeyValue::new(k, v));
+    }
+    builder.build()
+}
+
+/// Parse the standard `OTEL_RESOURCE_ATTRIBUTES` value — comma-separated
+/// `key=value` pairs (W3C Baggage form) — into pairs. Keys/values are trimmed;
+/// entries without `=` or with an empty key are skipped.
+fn parse_otel_resource_attributes(raw: &str) -> Vec<(String, String)> {
+    raw.split(',')
+        .filter_map(|pair| {
+            let (k, v) = pair.split_once('=')?;
+            let k = k.trim();
+            if k.is_empty() {
+                return None;
+            }
+            Some((k.to_string(), v.trim().to_string()))
+        })
+        .collect()
+}
+
+/// Resolve the effective extra resource attributes. Precedence, lowest first:
+/// `cfg.resource_attributes` < `OTEL_RESOURCE_ATTRIBUTES` (per key) <
+/// `PHOENIX_PROJECT_NAME` (sets [`PHOENIX_PROJECT_KEY`]). Env args are passed in
+/// so the merge is testable without mutating process env.
+fn merged_resource_attributes(
+    cfg: &OtelConfig,
+    otel_env: Option<String>,
+    phoenix_env: Option<String>,
+) -> BTreeMap<String, String> {
+    let mut attrs: BTreeMap<String, String> = cfg.resource_attributes.clone();
+    if let Some(raw) = otel_env {
+        for (k, v) in parse_otel_resource_attributes(&raw) {
+            attrs.insert(k, v);
+        }
+    }
+    if let Some(name) = phoenix_env {
+        let name = name.trim();
+        if !name.is_empty() {
+            attrs.insert(PHOENIX_PROJECT_KEY.to_string(), name.to_string());
+        }
+    }
+    attrs
 }
 
 /// Effective endpoint: `OTEL_EXPORTER_OTLP_ENDPOINT` env override, else config.
@@ -598,6 +648,77 @@ mod tests {
         assert_eq!(
             otlp_signal_endpoint("http://collector:4318/", "/v1/metrics"),
             "http://collector:4318/v1/metrics"
+        );
+    }
+
+    #[test]
+    fn parse_resource_attrs_basic_trims_and_skips_malformed() {
+        let got = parse_otel_resource_attributes(
+            " openinference.project.name = my-proj , deployment.env=prod ,bad,=novalue,k= ",
+        );
+        assert_eq!(
+            got,
+            vec![
+                ("openinference.project.name".to_string(), "my-proj".to_string()),
+                ("deployment.env".to_string(), "prod".to_string()),
+                ("k".to_string(), "".to_string()),
+            ],
+            "trims ws, keeps empty values, drops entries without `=` or empty key"
+        );
+    }
+
+    fn cfg_with_attrs(pairs: &[(&str, &str)]) -> OtelConfig {
+        OtelConfig {
+            resource_attributes: pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn merged_attrs_config_only_passthrough() {
+        let cfg = cfg_with_attrs(&[(PHOENIX_PROJECT_KEY, "from-config")]);
+        let got = merged_resource_attributes(&cfg, None, None);
+        assert_eq!(got.get(PHOENIX_PROJECT_KEY).map(String::as_str), Some("from-config"));
+    }
+
+    #[test]
+    fn merged_attrs_otel_env_overrides_config_per_key() {
+        let cfg = cfg_with_attrs(&[(PHOENIX_PROJECT_KEY, "from-config"), ("keep", "kept")]);
+        let got = merged_resource_attributes(
+            &cfg,
+            Some(format!("{PHOENIX_PROJECT_KEY}=from-env")),
+            None,
+        );
+        assert_eq!(got.get(PHOENIX_PROJECT_KEY).map(String::as_str), Some("from-env"));
+        assert_eq!(got.get("keep").map(String::as_str), Some("kept"), "untouched keys survive");
+    }
+
+    #[test]
+    fn merged_attrs_phoenix_env_wins_over_all() {
+        let cfg = cfg_with_attrs(&[(PHOENIX_PROJECT_KEY, "from-config")]);
+        let got = merged_resource_attributes(
+            &cfg,
+            Some(format!("{PHOENIX_PROJECT_KEY}=from-otel-env")),
+            Some("from-phoenix-env".to_string()),
+        );
+        assert_eq!(
+            got.get(PHOENIX_PROJECT_KEY).map(String::as_str),
+            Some("from-phoenix-env"),
+            "PHOENIX_PROJECT_NAME has highest precedence"
+        );
+    }
+
+    #[test]
+    fn merged_attrs_blank_phoenix_env_ignored() {
+        let cfg = cfg_with_attrs(&[(PHOENIX_PROJECT_KEY, "from-config")]);
+        let got = merged_resource_attributes(&cfg, None, Some("   ".to_string()));
+        assert_eq!(
+            got.get(PHOENIX_PROJECT_KEY).map(String::as_str),
+            Some("from-config"),
+            "blank PHOENIX_PROJECT_NAME does not clobber config"
         );
     }
 
