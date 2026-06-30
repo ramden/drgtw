@@ -385,6 +385,10 @@ Some backends route spans by a resource attribute rather than `service.name`. Fo
    ```
 3. **`PHOENIX_PROJECT_NAME` env** — convenience that sets `openinference.project.name` only; overrides both of the above.
 
+#### Inbound trace-context propagation
+
+When traces are enabled, the gateway honours **W3C trace context**. If an incoming request carries a `traceparent` header (with optional `tracestate`) — as emitted by an OTel-instrumented caller — the `proxy_request` span is started as a **child of that remote span** rather than a new root. The priced gateway span then lands in the **same trace** as the caller's LLM span and inherits its propagated baggage (e.g. `session.id`), so per-trace / per-session cost rolls up correctly in the backend. Requests without a valid `traceparent` start a fresh root span as before. No configuration is required; propagation follows the `traces` switch.
+
 ### Privacy allow-list
 
 Spans and metrics carry **only** allow-listed, content-free metadata: model (request/response), connection name, upstream host/port, status / error class, token counts, cost USD, latency, time-to-first-chunk, `key_id` (virtual-key *name*, never the secret), `pii` flag, `request_id` (spans only), endpoint/operation, and fallback attempts. Prompt/response content, PII values, pseudonyms, and secrets are never emitted, and there is no configuration switch that enables content capture. This is enforced by construction (the telemetry type has no field that can hold content) and guarded by tests.

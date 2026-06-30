@@ -500,6 +500,12 @@ pub fn init(cfg: &OtelConfig) -> anyhow::Result<Option<OtelGuard>> {
     let timeout = Duration::from_millis(cfg.export_timeout_ms);
 
     let tracer_provider = if cfg.traces {
+        // Honour inbound W3C trace context (`traceparent`/`tracestate`) so the
+        // proxy span can nest under an OTel-instrumented caller's span instead
+        // of starting a fresh root. Extraction happens in the proxy handler.
+        opentelemetry::global::set_text_map_propagator(
+            opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+        );
         Some(build_tracer_provider(cfg, &endpoint, timeout, res.clone())?)
     } else {
         None

@@ -21,6 +21,7 @@ mod eventstream;
 mod handlers;
 mod mcp;
 pub mod otel_enrich;
+mod otel_propagation;
 pub mod reload;
 mod sigv4;
 mod sse_restore;

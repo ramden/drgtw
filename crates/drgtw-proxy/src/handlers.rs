@@ -572,6 +572,8 @@ async fn proxy_endpoint(
         streaming,
         request_id = %request_id,
     );
+    // Nest under the caller's remote span when a W3C traceparent is present.
+    crate::otel_propagation::set_remote_parent(&span, &parts.headers);
 
     let rate_allowed = if let RateDecision::Allowed { remaining, limit } = rate_decision {
         Some((remaining, limit))
@@ -1827,6 +1829,8 @@ async fn embeddings_inner(
         streaming = false,
         request_id = %request_id,
     );
+    // Nest under the caller's remote span when a W3C traceparent is present.
+    crate::otel_propagation::set_remote_parent(&span, &parts.headers);
 
     let rate_allowed = if let RateDecision::Allowed { remaining, limit } = rate_decision {
         Some((remaining, limit))
