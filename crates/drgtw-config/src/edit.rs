@@ -450,6 +450,7 @@ fn configs_pii_eq(a: &Config, b: &Config) -> bool {
     a.pii.enabled_by_default == b.pii.enabled_by_default
         && a.pii.disabled_recognizers == b.pii.disabled_recognizers
         && a.pii.embeddings_require_vault == b.pii.embeddings_require_vault
+        && a.pii.embeddings_disable_pii == b.pii.embeddings_disable_pii
         && a.pii.require_ner == b.pii.require_ner
         && a.pii.entities == b.pii.entities
         && custom_recognizers_eq(&a.pii.custom_recognizers, &b.pii.custom_recognizers)

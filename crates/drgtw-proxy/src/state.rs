@@ -155,6 +155,11 @@ fn open_vault_store(
 /// Decide the boot-time posture for `/v1/embeddings` placeholder stability
 /// (WP 9.4) and act on it.
 fn check_embeddings_vault_posture(config: &Config) -> Result<(), EngineBuildError> {
+    // PII disabled for embeddings → the vault never runs for the embeddings
+    // path, so its posture (require/warn) is moot.
+    if config.pii.embeddings_disable_pii {
+        return Ok(());
+    }
     if config.pii.vault.is_some() {
         return Ok(());
     }
@@ -220,5 +225,14 @@ mod tests {
             }
             other => panic!("expected Vault error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn posture_ok_when_disable_pii_set_even_if_require_vault_without_vault() {
+        // embeddings_disable_pii short-circuits: the vault never runs for the
+        // embeddings path, so require_vault-without-vault is not a boot error.
+        let mut config = config_with_pii(None, true);
+        config.pii.embeddings_disable_pii = true;
+        assert!(check_embeddings_vault_posture(&config).is_ok());
     }
 }

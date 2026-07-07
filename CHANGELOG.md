@@ -3,6 +3,20 @@
 All notable changes to drgtw are documented here. The format is loosely based
 on [Keep a Changelog](https://keepachangelog.com/); versions are pre-1.0 alpha.
 
+## [0.0.15-alpha] — 2026-07-07
+
+### Added — disable PII for embeddings deployment-wide
+- **`pii.embeddings_disable_pii`**: config-level kill-switch that skips the PII
+  pipeline entirely for `/v1/embeddings`. When `true`, embeddings request bodies
+  are forwarded verbatim regardless of the `x-drgtw-pii` header,
+  `enabled_by_default`, or the key's `allow_pii_bypass`. Chat and messages
+  endpoints are unaffected. Supersedes `embeddings_require_vault` for the
+  embeddings path (PII never runs, so the vault posture is moot — the boot
+  posture check short-circuits). Defaults to `false`. Intended for deployments
+  where embeddings feed a trusted, private vector store and masking would mutate
+  the input text and skew the vectors. **Confidentiality trade-off:** PII in
+  embeddings inputs reaches the upstream provider in clear text.
+
 ## [0.0.10-alpha] — 2026-06-25
 
 ### Added — smaller NER model image

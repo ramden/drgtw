@@ -79,6 +79,7 @@ fn openai_pii_config(mock_base_url: &str, pii_enabled: bool) -> Arc<Config> {
             vault: None,
             embeddings_require_vault: false,
             require_ner: false,
+            embeddings_disable_pii: false,
         },
         events: None,
         fallback: Default::default(),

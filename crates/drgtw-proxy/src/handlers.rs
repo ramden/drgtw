@@ -1724,12 +1724,17 @@ async fn embeddings_inner(
     }
 
     // 4. PII mode. Bypass header honored only for `allow_pii_bypass` keys.
+    //    `pii.embeddings_disable_pii` is a config-level kill-switch: when set it
+    //    forces PII off for every embeddings request, regardless of the header
+    //    or `enabled_by_default`. The header is still validated first so an
+    //    invalid `x-drgtw-pii` value is rejected consistently with the chat path.
     let pii_mode = resolve_pii_mode(
         &parts.headers,
         live.config.pii.enabled_by_default,
         resolved.allow_pii_bypass,
         ErrorFormat::OpenAi,
     )?;
+    let pii_mode = if live.config.pii.embeddings_disable_pii { PiiMode::Off } else { pii_mode };
 
     // 5. Buffer body (enforce max_body_bytes).
     let max = live.config.server.max_body_bytes;

@@ -309,6 +309,82 @@ async fn test_embeddings_pii_off_byte_identical() {
 }
 
 // ---------------------------------------------------------------------------
+// 5b. embeddings_disable_pii: config kill-switch forwards PII verbatim even
+//     when PII is enabled by default and no bypass header is sent.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_embeddings_disable_pii_forwards_raw() {
+    let mock = MockServer::start().await;
+    mount_embeddings_ok(&mock).await;
+
+    // PII ON by default (would normally pseudonymize), but the embeddings
+    // kill-switch is set → the upstream must receive the RAW email.
+    let mut cfg = (*openai_config(&mock.uri(), true, None, false)).clone();
+    cfg.pii.embeddings_disable_pii = true;
+    let app = build_router(Arc::new(cfg));
+
+    let body = json!({
+        "model": "text-embedding-3-small",
+        "input": "mail max@example.com"
+    });
+    let resp = app
+        .oneshot(embeddings_request(&body.to_string()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let received = mock.received_requests().await.unwrap();
+    assert_eq!(received.len(), 1);
+    let up: Value = serde_json::from_slice(&received[0].body).unwrap();
+    assert_eq!(
+        up["input"].as_str().unwrap(),
+        "mail max@example.com",
+        "kill-switch must forward the raw input untouched"
+    );
+}
+
+#[tokio::test]
+async fn test_disable_pii_does_not_affect_chat() {
+    // The kill-switch is embeddings-scoped: chat must still pseudonymize.
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({
+                    "id": "chatcmpl-1",
+                    "object": "chat.completion",
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                }))
+                .insert_header("content-type", "application/json"),
+        )
+        .mount(&mock)
+        .await;
+
+    let mut cfg = (*openai_config(&mock.uri(), true, None, false)).clone();
+    cfg.pii.embeddings_disable_pii = true;
+    let app = build_router(Arc::new(cfg));
+
+    let body = json!({
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "mail max@example.com"}]
+    });
+    let resp = app.oneshot(chat_request(&body.to_string())).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let received = mock.received_requests().await.unwrap();
+    assert_eq!(received.len(), 1);
+    let up: Value = serde_json::from_slice(&received[0].body).unwrap();
+    let sent = up["messages"][0]["content"].as_str().unwrap();
+    assert!(
+        !sent.contains("max@example.com"),
+        "chat must still pseudonymize despite embeddings_disable_pii: {sent}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // 6. 401 (bad key) and 404 (unknown model)
 // ---------------------------------------------------------------------------
 

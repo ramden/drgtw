@@ -324,6 +324,7 @@ async fn pii_request_sets_pii_flag_in_usage_event() {
             vault: None,
             embeddings_require_vault: false,
             require_ner: false,
+            embeddings_disable_pii: false,
         },
         events: Some(EventsConfig {
             url: format!("{}/events", sink.uri()),

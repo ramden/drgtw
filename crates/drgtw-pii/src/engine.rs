@@ -408,6 +408,7 @@ mod tests {
             vault: None,
             embeddings_require_vault: false,
             require_ner: false,
+            embeddings_disable_pii: false,
         }
     }
 
@@ -424,6 +425,7 @@ mod tests {
             vault: None,
             embeddings_require_vault: false,
             require_ner: false,
+            embeddings_disable_pii: false,
         }
     }
 
@@ -437,6 +439,7 @@ mod tests {
             vault: None,
             embeddings_require_vault: false,
             require_ner: false,
+            embeddings_disable_pii: false,
         }
     }
 
@@ -584,6 +587,7 @@ mod tests {
             vault: None,
             embeddings_require_vault: false,
             require_ner: false,
+            embeddings_disable_pii: false,
         };
         let engine = PiiEngine::from_config(&cfg).unwrap();
         let text = "say hello world!";
@@ -618,6 +622,7 @@ mod tests {
             vault: None,
             embeddings_require_vault: false,
             require_ner: false,
+            embeddings_disable_pii: false,
         };
         let engine = PiiEngine::from_config(&cfg).unwrap();
         let text = "check TOKEN here";

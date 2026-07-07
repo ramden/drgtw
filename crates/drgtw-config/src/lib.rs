@@ -247,6 +247,20 @@ pub struct PiiConfig {
     /// absent in development.
     #[serde(default)]
     pub embeddings_require_vault: bool,
+    /// Disable the PII pipeline entirely for `/v1/embeddings`, regardless of the
+    /// per-request `x-drgtw-pii` header or `enabled_by_default`. When `true`,
+    /// embeddings request bodies are forwarded verbatim (no scan, no
+    /// pseudonymization) — useful when embeddings feed a private, trusted vector
+    /// store where the original text must be embedded faithfully, and where
+    /// per-request placeholders would corrupt vector consistency. Chat and
+    /// messages endpoints are unaffected. Defaults to `false`.
+    ///
+    /// This is a deliberate confidentiality trade-off: with it set, PII in
+    /// embeddings inputs reaches the upstream embeddings provider in clear text.
+    /// It also supersedes [`PiiConfig::embeddings_require_vault`] for the
+    /// embeddings path — when PII never runs, the vault posture is moot.
+    #[serde(default)]
+    pub embeddings_disable_pii: bool,
     /// Fail boot when the PII pipeline is enabled but no `[pii.ner]` model is
     /// configured. Defaults to `false` (a boot *warning* is logged instead).
     ///
@@ -344,6 +358,7 @@ impl Default for PiiConfig {
             ner: None,
             vault: None,
             embeddings_require_vault: false,
+            embeddings_disable_pii: false,
             require_ner: false,
         }
     }
@@ -3137,6 +3152,22 @@ postgres_url = "${DRGTW_TEST_UI_PG_MISSING}"
             !cfg.pii.embeddings_require_vault,
             "embeddings_require_vault should default to false"
         );
+    }
+
+    #[test]
+    fn test_embeddings_disable_pii_default_false() {
+        let cfg = load_toml("").expect("empty config");
+        assert!(
+            !cfg.pii.embeddings_disable_pii,
+            "embeddings_disable_pii should default to false"
+        );
+    }
+
+    #[test]
+    fn test_embeddings_disable_pii_parsed() {
+        let toml = "[pii]\nembeddings_disable_pii = true\n";
+        let cfg = load_toml(toml).expect("flag parses");
+        assert!(cfg.pii.embeddings_disable_pii);
     }
 
     #[test]

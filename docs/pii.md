@@ -196,6 +196,26 @@ case: a code/embedding-analysis job sends `x-drgtw-pii: off` on its
 while the same deployment's chat traffic stays scanned. An unauthorized key sending
 the same header is silently scanned anyway.
 
+### Disabling PII for embeddings deployment-wide
+
+When *every* embeddings call in a deployment must embed the original text — masking
+mutates input and skews the vectors — set the config-level kill-switch instead of
+relying on per-request headers and per-key bypass:
+
+```toml
+[pii]
+enabled_by_default     = true    # chat/messages still scanned
+embeddings_disable_pii = true    # /v1/embeddings never scanned
+```
+
+With this set, `/v1/embeddings` bodies are forwarded verbatim regardless of the
+`x-drgtw-pii` header, `enabled_by_default`, or the key's `allow_pii_bypass`. Chat
+and messages endpoints are unaffected. It supersedes `embeddings_require_vault` for
+the embeddings path (PII never runs, so the vault posture is moot).
+
+**Confidentiality trade-off:** PII in embeddings inputs reaches the upstream
+embeddings provider in clear text. Use only when the embeddings upstream is trusted.
+
 ---
 
 ## NER performance: scoping and caching

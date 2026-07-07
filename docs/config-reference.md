@@ -120,6 +120,7 @@ Optional. PII pseudonymization. **Fully live** — the engine runs in the reques
 | `entities` | array of strings | no | *(absent → keep all)* | Optional allow-list of entity **kinds** to keep. See [Entity allow-list](#entity-allow-list). |
 | `require_ner` | bool | no | `false` | When `true` and **no** `[pii.ner]` block is configured, the gateway **refuses to boot** (fail-closed for GDPR). See [NER boot behaviour](#ner-and-missing-model-boot-behaviour). |
 | `embeddings_require_vault` | bool | no | `false` | When `true`, embeddings requests require a configured `[pii.vault]` (so pseudonyms are reversible) or the request is rejected. |
+| `embeddings_disable_pii` | bool | no | `false` | When `true`, the PII pipeline is skipped entirely for `/v1/embeddings` — request bodies are forwarded verbatim regardless of the `x-drgtw-pii` header or `enabled_by_default`. Chat/messages are unaffected. Supersedes `embeddings_require_vault` for the embeddings path. **Confidentiality trade-off:** PII in embeddings inputs reaches the upstream provider in clear text. |
 
 ### Entity allow-list
 
