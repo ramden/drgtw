@@ -438,3 +438,193 @@ fn test_invalid_custom_regex_fails_boot() {
         "error message should mention the recognizer or regex, got: {err_msg}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// /info status endpoint
+// ---------------------------------------------------------------------------
+
+/// Rich config with secrets across every subsystem, used to assert `/info`
+/// leaks none of them. `[pii.ner]` is intentionally omitted — the NER model
+/// loads eagerly at boot and is not present in CI.
+fn load_info_config(with_token: bool) -> Arc<drgtw_config::Config> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(5000);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+
+    let server = if with_token {
+        "[server]\nstatus_token = \"sk-health-tok-777\"\n"
+    } else {
+        ""
+    };
+    let toml_content = format!(
+        r#"{server}
+[[connections]]
+name = "azure-openai"
+base_url = "https://secret-host.example.com/v1"
+api_key = "sk-UPSTREAM-SECRET-KEY-9f8e7d"
+format = "open_ai"
+models = ["gpt-4.1-mini", "text-embedding-3-small"]
+
+[[virtual_keys]]
+key = "sk-drgtw-infotest01"
+connections = ["azure-openai"]
+
+[pii]
+enabled_by_default = true
+require_ner = false
+entities = ["PERSON", "EMAIL"]
+
+[[pii.custom_recognizers]]
+name = "ticket"
+pattern = 'TICKET-\d+'
+
+[model_aliases]
+fast = "gpt-4.1-mini"
+
+[[guardrails.rules]]
+name = "block-injection"
+kind = "prompt_injection"
+action = "block"
+
+[mcp_servers.github]
+url = "https://mcp-secret.example.com/sse"
+auth_type = "bearer"
+auth_value = "MCP-SECRET-TOKEN-abc"
+description = "GitHub tools"
+
+[otel]
+enabled = true
+endpoint = "http://otel-collector.internal:4317"
+
+[events]
+url = "https://events-secret.example.com/ingest"
+auth_bearer = "EVENTS-SECRET-BEARER"
+"#
+    );
+    let path = std::env::temp_dir().join(format!("drgtw-e2e-info-{n}.toml"));
+    let mut f = std::fs::File::create(&path).expect("create temp config");
+    f.write_all(toml_content.as_bytes()).expect("write temp config");
+    Arc::new(load(&path).expect("load temp config"))
+}
+
+fn get(uri: &str) -> Request<Body> {
+    Request::builder().method("GET").uri(uri).body(Body::empty()).unwrap()
+}
+
+#[tokio::test]
+async fn test_info_route_shape() {
+    let cfg = load_info_config(false);
+    let app = drgtw::server::router(cfg, std::path::Path::new("."), std::path::PathBuf::new())
+        .expect("router build failed");
+
+    let resp = app.oneshot(get("/info")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body: Value = serde_json::from_slice(&collect_body(resp).await).expect("info body is JSON");
+
+    assert_eq!(body["service"], "drgtw");
+    assert_eq!(body["schema_version"], 1);
+    assert!(body["version"].is_string());
+    assert!(body["build"]["git_sha"].is_string());
+    assert!(body["build"]["built_at"].is_string());
+    assert!(body["started_at"].is_string());
+    assert!(body["uptime_seconds"].is_u64());
+
+    // config_fingerprint present and shaped.
+    let fp = body["config_fingerprint"].as_str().expect("fingerprint string");
+    assert!(fp.starts_with("sha256:"), "fingerprint should be sha256:… got {fp}");
+    assert_eq!(fp.len(), "sha256:".len() + 64);
+
+    // Models enumerated by name (no creds).
+    let models = body["models"].as_array().expect("models array");
+    let names: Vec<&str> = models.iter().filter_map(|m| m["model"].as_str()).collect();
+    assert!(names.contains(&"gpt-4.1-mini"));
+    assert!(names.contains(&"text-embedding-3-small"));
+    assert_eq!(models[0]["connection"], "azure-openai");
+
+    // pii effective settings — no NER configured -> null.
+    assert_eq!(body["pii"]["enabled_by_default"], true);
+    assert!(body["pii"]["ner"].is_null());
+    let recog: Vec<&str> = body["pii"]["custom_recognizers"].as_array().unwrap()
+        .iter().filter_map(|v| v.as_str()).collect();
+    assert_eq!(recog, vec!["ticket"]); // name only
+
+    // guardrails / mcp / otel projections.
+    assert_eq!(body["guardrails"]["enabled"], true);
+    assert_eq!(body["guardrails"]["rules"][0]["name"], "block-injection");
+    assert_eq!(body["guardrails"]["rules"][0]["kind"], "prompt_injection");
+    assert_eq!(body["mcp"]["enabled"], true);
+    assert_eq!(body["mcp"]["server_count"], 1);
+    assert_eq!(body["mcp"]["servers"][0]["name"], "github");
+    assert_eq!(body["mcp"]["servers"][0]["description"], "GitHub tools");
+    assert_eq!(body["otel"]["enabled"], true);
+    assert_eq!(body["events"]["enabled"], true);
+}
+
+#[tokio::test]
+async fn test_info_never_leaks_secrets() {
+    let cfg = load_info_config(true); // token set — must also be absent from body
+    let app = drgtw::server::router(cfg, std::path::Path::new("."), std::path::PathBuf::new())
+        .expect("router build failed");
+
+    // Authenticate so we get the full body (gate covered by its own test).
+    let req = Request::builder()
+        .method("GET")
+        .uri("/info")
+        .header("x-health-token", "sk-health-tok-777")
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = collect_body(resp).await;
+    let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+
+    for secret in [
+        "sk-UPSTREAM-SECRET-KEY-9f8e7d", // upstream api key
+        "secret-host.example.com",       // upstream base url host
+        "MCP-SECRET-TOKEN-abc",          // mcp auth
+        "mcp-secret.example.com",        // mcp url
+        "otel-collector.internal",       // otel endpoint
+        "events-secret.example.com",     // events url
+        "EVENTS-SECRET-BEARER",          // events bearer
+        "sk-health-tok-777",             // the status token itself
+        "TICKET-",                       // custom recognizer *pattern*
+    ] {
+        assert!(!text.contains(secret), "/info leaked secret substring: {secret}\nbody: {text}");
+    }
+}
+
+#[tokio::test]
+async fn test_info_token_gate() {
+    let cfg = load_info_config(true);
+    let app = drgtw::server::router(cfg, std::path::Path::new("."), std::path::PathBuf::new())
+        .expect("router build failed");
+
+    // No token -> 401.
+    let resp = app.clone().oneshot(get("/info")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+    // Wrong token -> 401.
+    let wrong = Request::builder().method("GET").uri("/info")
+        .header("x-health-token", "nope").body(Body::empty()).unwrap();
+    assert_eq!(app.clone().oneshot(wrong).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+
+    // Correct token -> 200.
+    let ok = Request::builder().method("GET").uri("/info")
+        .header("x-health-token", "sk-health-tok-777").body(Body::empty()).unwrap();
+    assert_eq!(app.oneshot(ok).await.unwrap().status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_health_ready_route() {
+    let cfg = load_info_config(false);
+    let app = drgtw::server::router(cfg, std::path::Path::new("."), std::path::PathBuf::new())
+        .expect("router build failed");
+
+    let resp = app.oneshot(get("/health/ready")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(&collect_body(resp).await).unwrap();
+    assert_eq!(body["status"], "ready");
+    assert_eq!(body["ner_loaded"], false); // no NER model in this config
+}

@@ -918,6 +918,7 @@ Everything in this repository is the Community Edition, licensed under the
 * Usage events and cost tracking
 * MCP gateway (`/mcp`)
 * Request tracing with rotation and retention
+* Status & health endpoints (`/info`, `/health`, `/health/ready`) — see [docs/status-endpoint.md](docs/status-endpoint.md)
 * Configuration management
 
 ### Enterprise Edition

@@ -12,6 +12,8 @@ Optional. Configures the gateway listener.
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `bind_addr` | string (SocketAddr) | no | `"127.0.0.1:8080"` | Address and port the gateway listens on. Any value accepted by Rust's `SocketAddr` parser. |
+| `max_body_bytes` | integer | no | `10485760` (10 MiB) | Maximum request body size; larger requests get `413`. |
+| `status_token` | string | no | — | Shared token gating `GET /info`. When set, `/info` requires a matching `x-health-token` header (`401` otherwise); when omitted, `/info` is open like `/health`. Never appears in any response body. Supports `${ENV_VAR}`. See [Status endpoint](status-endpoint.md). |
 
 ---
 

@@ -38,6 +38,7 @@ fn tiny_max_body_config(mock_base_url: &str) -> Arc<Config> {
         server: ServerConfig {
             bind_addr: "127.0.0.1:8080".parse::<SocketAddr>().unwrap(),
             max_body_bytes: 32,
+            status_token: None,
         },
         connections: vec![Connection {
             name: "mock-openai".into(),
@@ -638,6 +639,7 @@ async fn test_body_within_limit_openai_proceeds() {
         server: ServerConfig {
             bind_addr: "127.0.0.1:8080".parse::<SocketAddr>().unwrap(),
             max_body_bytes: 10_485_760, // 10 MiB — default
+            status_token: None,
         },
         connections: vec![Connection {
             name: "mock-openai".into(),

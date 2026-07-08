@@ -9,6 +9,11 @@
 # Default: "127.0.0.1:8080"
 bind_addr = "127.0.0.1:8080"
 
+# Optional shared token gating the GET /info status endpoint. When set, /info
+# requires a matching `x-health-token` header; when omitted (default), /info is
+# open like /health. Never appears in any response body. Supports ${ENV_VAR}.
+# status_token = "${DRGTW_STATUS_TOKEN}"
+
 # ---------------------------------------------------------------------------
 # [[connections]] — one table per upstream provider.
 # Each connection has a unique name, a base URL, an API key, a wire format,

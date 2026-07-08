@@ -3,7 +3,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use axum::{Router, routing::get};
 use tokio::net::TcpListener;
@@ -110,10 +110,14 @@ pub fn router_with_gate(
     // both point at the same `ArcSwap<Live>`.
     let reloader = state.reloader(config_path.clone(), base_dir.to_path_buf());
 
+    let info_routes = routes::info::routes(routes::info::InfoState {
+        proxy: Arc::clone(&state),
+        started_at: SystemTime::now(),
+    });
     let proxy_routes = drgtw_proxy::router(state);
     let health_route = Router::new().route("/health", get(routes::health::handle));
 
-    let mut app = Router::new().merge(proxy_routes).merge(health_route);
+    let mut app = Router::new().merge(proxy_routes).merge(health_route).merge(info_routes);
 
     // Mount the admin UI under `/ui` only when enabled. The concept exposes no
     // auth — see the run() construction site for the TODO gating non-localhost.
@@ -200,9 +204,13 @@ pub async fn run(
     // built from the shared proxy state before it moves into the proxy router.
     let reloader = state.reloader(config_path.clone(), base_dir.to_path_buf());
 
+    let info_routes = routes::info::routes(routes::info::InfoState {
+        proxy: Arc::clone(&state),
+        started_at: SystemTime::now(),
+    });
     let proxy_routes = drgtw_proxy::router(state);
     let health_route = Router::new().route("/health", get(routes::health::handle));
-    let mut app = Router::new().merge(proxy_routes).merge(health_route);
+    let mut app = Router::new().merge(proxy_routes).merge(health_route).merge(info_routes);
 
     // Mount the admin UI under `/ui` only when enabled.
     // TODO(ui-auth): admin token + signed cookie session before any non-localhost exposure

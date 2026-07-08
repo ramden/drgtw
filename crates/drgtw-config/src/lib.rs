@@ -12,14 +12,14 @@ use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
 use std::path::Path;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 /// Prefix every virtual key must carry.
 pub const VIRTUAL_KEY_PREFIX: &str = "sk-drgtw-";
 
 /// Fully loaded, env-resolved, validated configuration.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Config {
     #[serde(default)]
     pub server: ServerConfig,
@@ -63,7 +63,7 @@ pub struct Config {
     pub guardrails: GuardrailsConfig,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ServerConfig {
     /// Address the gateway listens on.
     #[serde(default = "default_bind_addr")]
@@ -73,6 +73,14 @@ pub struct ServerConfig {
     /// Default: 10 MiB (10_485_760). Must be > 0.
     #[serde(default = "default_max_body_bytes")]
     pub max_body_bytes: usize,
+    /// Optional shared token that gates the unauthenticated `GET /info` status
+    /// endpoint. When set, `/info` requires a matching `x-health-token` request
+    /// header (constant-time compared); mismatches get `401`. When absent (the
+    /// default), `/info` is open — matching the always-open `/health` probe.
+    /// Supports `${ENV_VAR}` substitution (resolved at `load()`). Never appears
+    /// in any response body.
+    #[serde(default)]
+    pub status_token: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -80,6 +88,7 @@ impl Default for ServerConfig {
         Self {
             bind_addr: default_bind_addr(),
             max_body_bytes: default_max_body_bytes(),
+            status_token: None,
         }
     }
 }
@@ -97,7 +106,7 @@ fn default_max_body_bytes() -> usize {
 /// Both prices are in USD per 1 million tokens.
 /// Keys may use the same trailing-`*` wildcard syntax as the `models` list.
 /// Keys need not appear in the connection's `models` list (cost for wildcard-served models).
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct ModelCost {
     /// USD per 1M input tokens. Must be finite and >= 0.
     pub input_per_1m: f64,
@@ -106,7 +115,7 @@ pub struct ModelCost {
 }
 
 /// An upstream provider connection.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Connection {
     /// Unique name referenced by virtual keys.
     pub name: String,
@@ -140,7 +149,7 @@ pub struct Connection {
     pub aws_session_token: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApiFormat {
     OpenAi,
@@ -158,7 +167,7 @@ pub enum ApiFormat {
 }
 
 /// Per-virtual-key spend budget (WP 8.1).
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct Budget {
     /// Maximum spend in USD for the window. Must be finite and > 0.
     pub max_usd: f64,
@@ -167,7 +176,7 @@ pub struct Budget {
 }
 
 /// A virtual API key handed to downstream callers.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct VirtualKey {
     /// The key value. Must start with [`VIRTUAL_KEY_PREFIX`].
     pub key: String,
@@ -195,7 +204,7 @@ pub struct VirtualKey {
 }
 
 /// Per-virtual-key token-bucket rate limit configuration.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RateLimit {
     /// Maximum requests in the window.
     pub requests: u32,
@@ -204,7 +213,7 @@ pub struct RateLimit {
 }
 
 /// PII pipeline settings. Placeholder in Phase 0; grows in Phase 3+.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PiiConfig {
     /// Default mode when the caller sends no `x-drgtw-pii` header.
     /// Defaults to `true` — privacy-first: callers must opt OUT.
@@ -277,7 +286,7 @@ pub struct PiiConfig {
 ///
 /// The vault stores stable entity→placeholder mappings in a SQLite database,
 /// with original values encrypted at rest. Required fields: `path`, `key`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct VaultConfig {
     /// Path to the SQLite database file. Required, non-empty. A relative path is
     /// resolved against the config-file directory by the consumer (the same
@@ -293,7 +302,7 @@ pub struct VaultConfig {
 /// The basic UI tier runs with zero persistence. The optional `[ui.history]`
 /// section unlocks the history/audit nav — its presence is the only signal the
 /// UI uses; the concept never opens a Postgres connection.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct UiConfig {
     /// Mount the UI under `/ui`. Defaults to `false` — opt-in, like `[otel]`.
     #[serde(default)]
@@ -317,7 +326,7 @@ pub struct UiConfig {
 ///
 /// `session_key` is resolved from `${ENV_VAR}` at `load()` time; the literal
 /// `${ENV_VAR}` form is accepted by the UI-mode validator without resolving.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UiAuthConfig {
     /// Login username shown in the sidebar footer.
     pub username: String,
@@ -341,7 +350,7 @@ fn default_session_ttl_hours() -> u64 {
 /// `${ENV_VAR}` references resolve at `load()` time and the value must be
 /// non-empty after resolution. The concept does not connect to Postgres; the
 /// section's presence merely unlocks the history/audit nav.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct UiHistoryConfig {
     /// PostgreSQL connection string. Supports `${ENV_VAR}` substitution
     /// (resolved at `load()` time). Must be non-empty after resolution.
@@ -436,7 +445,7 @@ pub fn canonical_pii_entity_name(name: &str) -> Option<&'static str> {
 /// ```
 ///
 /// Absent or empty `rules` = no guardrails (backward compatible).
-#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct GuardrailsConfig {
     /// Ordered list of guardrail rules. Evaluated in order; the first `Block`
     /// short-circuits.
@@ -452,7 +461,7 @@ impl GuardrailsConfig {
 }
 
 /// A single guardrail rule.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct GuardrailRule {
     /// Operator-facing name (appears in logs/traces when the rule fires).
     pub name: String,
@@ -477,7 +486,7 @@ pub struct GuardrailRule {
 }
 
 /// Built-in guardrail kinds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GuardrailKind {
     /// Heuristic prompt-injection / jailbreak detection on request text.
@@ -489,7 +498,7 @@ pub enum GuardrailKind {
 }
 
 /// When a guardrail rule runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum GuardrailPhase {
     /// On the request, before the upstream call. Default.
@@ -502,7 +511,7 @@ pub enum GuardrailPhase {
 }
 
 /// What a guardrail does when it matches.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum GuardrailAction {
     /// Reject the request/response with a content-filter error. Default.
@@ -515,7 +524,7 @@ pub enum GuardrailAction {
 }
 
 /// Behaviour when NER inference fails.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum FailMode {
     /// On error, log a warning and return no detections (open gate). Default.
@@ -527,7 +536,7 @@ pub enum FailMode {
 
 /// NER model and worker-pool configuration. Required fields: `model_dir`.
 /// All other fields have defaults.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct NerConfig {
     /// Path to the model directory. Supports `${ENV_VAR}` substitution
     /// (resolved at `load()` time). Existence is NOT checked here — it is
@@ -596,7 +605,7 @@ fn default_ner_cache_capacity() -> usize {
 /// Event-streaming sink configuration (WP 8.1).
 ///
 /// When present, the gateway will POST cost/usage events to `url`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EventsConfig {
     /// Absolute http(s) URL of the event sink. Required. Supports `${ENV_VAR}`.
     pub url: String,
@@ -626,7 +635,7 @@ fn default_events_timeout_ms() -> u64 {
 ///
 /// When `enabled` is `true` (the default) the gateway will try the next
 /// available connection if the primary one returns an error.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FallbackConfig {
     /// Enable connection-level fallback. Default `true`.
     #[serde(default = "default_fallback_enabled")]
@@ -648,7 +657,7 @@ fn default_fallback_enabled() -> bool {
 /// Tracing is **on by default**. When `enabled` is `false` the gateway writes
 /// no trace files. Paths are resolved against the config-file directory by the
 /// consumer (same convention as `pii.ner.model_dir`), not here.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TracingConfig {
     /// Master switch. Default `true`; set `false` to disable tracing entirely.
     #[serde(default = "default_tracing_enabled")]
@@ -697,7 +706,7 @@ fn default_tracing_archive_after_files() -> u64 {
 }
 
 /// OTLP transport protocol.
-#[derive(Debug, Clone, Copy, Deserialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum OtelProtocol {
     /// gRPC (OTLP/gRPC), conventional port 4317. Default.
@@ -718,7 +727,7 @@ pub enum OtelProtocol {
 /// request_id, endpoint, error class, fallback attempts). Prompt/response
 /// content, PII values, pseudonyms, and secrets are NEVER exported — there is
 /// no config switch to enable content capture.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct OtelConfig {
     /// Master switch. Default `false`. Everything below is inert until `true`.
@@ -790,7 +799,7 @@ fn default_otel_export_timeout_ms() -> u64 {
 }
 
 /// Upstream authentication scheme for an MCP server (WP-A).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum McpAuthType {
     /// No upstream auth header is sent. Default.
@@ -807,7 +816,7 @@ pub enum McpAuthType {
 /// Keyed by name in [`Config::mcp_servers`]. The name is the map key, not a
 /// field. `url`, `auth_value`, and every `extra_headers` value support
 /// `${ENV_VAR}` substitution (resolved at `load()` time).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct McpServerConfig {
     /// Absolute http(s) URL of the upstream MCP endpoint. Required.
     pub url: String,
@@ -834,7 +843,7 @@ pub struct McpServerConfig {
 
 /// A user-defined regex recognizer. The regex is compiled by the PII engine
 /// at startup; compile errors fail boot, not config load.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CustomRecognizer {
     /// Entity kind name, used as placeholder prefix (uppercased): `name = "ticket"` → `TICKET_1`.
     pub name: String,
@@ -874,6 +883,30 @@ impl Config {
             .get(name)
             .map(String::as_str)
             .unwrap_or(name)
+    }
+
+    /// Stable SHA-256 fingerprint of the fully-resolved, env-substituted config.
+    ///
+    /// The effective config is serialized to a canonical `serde_json::Value`
+    /// first: serde_json's default `Map` is a `BTreeMap`, so object keys are
+    /// emitted in sorted order and the hash is **stable across runs regardless
+    /// of `HashMap` iteration order**. Two processes with byte-identical
+    /// effective config produce the same fingerprint; any drift — including
+    /// differences introduced by `${ENV_VAR}` substitution — changes it.
+    /// Returned as `"sha256:<hex>"`.
+    ///
+    /// The intermediate JSON contains resolved secrets (upstream API keys, vault
+    /// key, session key, …). It is hashed immediately and never returned or
+    /// logged. The `Serialize` impl on the config tree exists ONLY to feed this
+    /// hasher — do not reuse it to emit config to a log line or a response body.
+    pub fn fingerprint(&self) -> String {
+        use sha2::{Digest, Sha256};
+        // Two-step (to_value then to_vec) is deliberate: to_value normalizes
+        // every map into serde_json's sorted BTreeMap-backed object, so the
+        // final byte stream is order-independent.
+        let value = serde_json::to_value(self).expect("config serializes to JSON");
+        let canonical = serde_json::to_vec(&value).expect("JSON value serializes");
+        format!("sha256:{}", hex::encode(Sha256::digest(&canonical)))
     }
 }
 
@@ -939,7 +972,24 @@ pub fn load_strict(path: &Path, strict: bool) -> Result<Config, ConfigError> {
         );
     }
 
-    // 3. Env-var resolution on connections.
+    // 3. Env-var resolution: server status token, then connections.
+    if let Some(token) = &config.server.status_token {
+        let resolved = resolve_env_vars(token, "server.status_token")?;
+        // Fail closed: an empty token (literal `""`, or `${VAR}` where VAR is set
+        // but empty) would make `ct_eq("", "")` true and silently open `/info` to
+        // unauthenticated callers — the opposite of the operator's intent. Reject
+        // it at boot rather than degrade the gate. Omit the field to leave /info
+        // open deliberately.
+        if resolved.is_empty() {
+            return Err(ConfigError::Invalid(
+                "server.status_token resolves to an empty string — omit the field to leave \
+                 /info open, or set a non-empty token to gate it (an empty token would \
+                 silently disable the gate)"
+                    .to_string(),
+            ));
+        }
+        config.server.status_token = Some(resolved);
+    }
     for conn in &mut config.connections {
         let field_api_key = format!("connections[{}].api_key", conn.name);
         conn.api_key = resolve_env_vars(&conn.api_key, &field_api_key)?;
@@ -1161,6 +1211,55 @@ mod tests {
         let mut f = NamedTempFile::new().expect("tempfile");
         f.write_all(content.as_bytes()).expect("write");
         load_strict(f.path(), strict)
+    }
+
+    // -----------------------------------------------------------------------
+    // config_fingerprint (v0.0.16) — drift detection for /info
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_fingerprint_is_sha256_shaped() {
+        let cfg = load_toml("[pii]\nenabled_by_default = true\n").expect("valid");
+        let fp = cfg.fingerprint();
+        assert!(fp.starts_with("sha256:"), "got {fp}");
+        assert_eq!(fp.len(), "sha256:".len() + 64);
+        assert!(fp["sha256:".len()..].chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_fingerprint_deterministic_across_loads() {
+        let toml = "[pii]\nenabled_by_default = true\n[model_aliases]\nb = \"y\"\na = \"x\"\n";
+        let a = load_toml(toml).expect("valid").fingerprint();
+        let b = load_toml(toml).expect("valid").fingerprint();
+        assert_eq!(a, b, "same effective config must fingerprint identically");
+    }
+
+    #[test]
+    fn test_fingerprint_changes_on_ner_scan_roles_drift() {
+        // The customer's #1 drift signal: a [pii.ner] block that lost its
+        // scan_roles / cache_capacity tuning must change the fingerprint.
+        let base = "[pii.ner]\nmodel_dir = \"models/ner\"\nscan_roles = [\"user\", \"assistant\"]\ncache_capacity = 102\n";
+        let drifted = "[pii.ner]\nmodel_dir = \"models/ner\"\n"; // scan_roles + cache back to defaults
+        let a = load_toml(base).expect("valid").fingerprint();
+        let b = load_toml(drifted).expect("valid").fingerprint();
+        assert_ne!(a, b, "scan_roles/cache_capacity drift must change the fingerprint");
+    }
+
+    #[test]
+    fn test_status_token_env_resolution() {
+        // SAFETY: single-threaded set/remove around one load.
+        unsafe { std::env::set_var("DRGTW_TEST_STATUS_TOKEN", "resolved-tok") };
+        let cfg = load_toml("[server]\nstatus_token = \"${DRGTW_TEST_STATUS_TOKEN}\"\n").expect("valid");
+        assert_eq!(cfg.server.status_token.as_deref(), Some("resolved-tok"));
+        unsafe { std::env::remove_var("DRGTW_TEST_STATUS_TOKEN") };
+    }
+
+    #[test]
+    fn test_empty_status_token_rejected() {
+        // Fail closed: an empty gate token must not silently open /info.
+        let err = load_toml("[server]\nstatus_token = \"\"\n").expect_err("empty token must fail");
+        assert!(matches!(err, ConfigError::Invalid(_)), "got {err:?}");
+        assert!(err.to_string().contains("status_token"));
     }
 
     // -----------------------------------------------------------------------

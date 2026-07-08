@@ -40,6 +40,7 @@ fn tiny_max_body_anthropic_config(mock_base_url: &str) -> Arc<Config> {
         server: ServerConfig {
             bind_addr: "127.0.0.1:8080".parse::<SocketAddr>().unwrap(),
             max_body_bytes: 32,
+            status_token: None,
         },
         connections: vec![Connection {
             name: "mock-anthropic".into(),

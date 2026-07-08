@@ -71,8 +71,15 @@ jobs:
 
       # Default features (ui -> postgres) on purpose — see ./Dockerfile header;
       # do NOT add --no-default-features (ships a UI-less, Postgres-less build).
+      # Bake authoritative build provenance into the binary for `GET /info`.
+      # build.rs falls back to `git rev-parse` locally; here we hand it the
+      # exact commit + build time so the reported sha is unambiguous.
       - name: Build release binary
-        run: cargo build --release -p drgtw
+        env:
+          DRGTW_GIT_SHA: ${{ github.sha }}
+        run: |
+          export DRGTW_BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          cargo build --release -p drgtw
 
       - name: Stage binary + ONNX Runtime libs
         run: |
